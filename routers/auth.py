@@ -1,9 +1,12 @@
+import os
+import smtplib
 import pyotp
 import secrets
 import uuid
 import re
 import jwt
 import json
+from email.message import EmailMessage
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Response, HTTPException, status, Depends
 from sqlalchemy.orm import Session
@@ -41,6 +44,35 @@ challenge_cache = {}
 router = APIRouter(prefix="/api/v1/auth")
 sec = SecurityEngine()
 limiter = Limiter(key_func=get_remote_address)
+
+
+def enviar_email_notificacao(destinatario: str, assunto: str, corpo: str) -> bool:
+    smtp_host = os.getenv("SMTP_HOST", "").strip()
+    smtp_port = os.getenv("SMTP_PORT", "").strip()
+    smtp_user = os.getenv("SMTP_USER", "").strip()
+    smtp_password = os.getenv("SMTP_PASSWORD", "").strip()
+    smtp_from = os.getenv("SMTP_FROM", "").strip()
+
+    if not all([smtp_host, smtp_port, smtp_user, smtp_password, smtp_from]):
+        print("[EMAIL DESATIVADO] variáveis SMTP incompletas; e-mail não enviado.")
+        return False
+
+    mensagem = EmailMessage()
+    mensagem["Subject"] = assunto
+    mensagem["From"] = smtp_from
+    mensagem["To"] = destinatario
+    mensagem.set_content(corpo)
+
+    try:
+        with smtplib.SMTP(smtp_host, int(smtp_port), timeout=10) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(mensagem)
+        return True
+    except Exception as exc:
+        print(f"[EMAIL ERRO] falha ao enviar e-mail: {exc}")
+        return False
+
 
 class LoginRequest(BaseModel):
     username: str

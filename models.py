@@ -8,6 +8,7 @@ class User(Base):
     __tablename__ = "users"
     id = Column(String, primary_key=True) #uuid v4
     username = Column(String, unique=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=True)
     password_hash = Column(String) #defesa:REQ-02.so guarda hash argon2
     #defesa:REQ-45.cada utilizador tem um par RSA2048 gerado no registo p assinar os PDFs
     rsa_pub = Column(Text) 
