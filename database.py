@@ -18,6 +18,10 @@ engine = create_engine(SQLALCHEMY_DATABASE_URL)
 # Cria a classe que vai gerar as sessões de base de dados para cada requisição
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Garante a criação das tabelas conforme os modelos declarados
+from models import Base
+Base.metadata.create_all(bind=engine)
+
 # Função de dependência para o FastAPI usar nas rotas
 def get_db():
     db = SessionLocal()

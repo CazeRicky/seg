@@ -1,5 +1,7 @@
 import os
 import smtplib
+import io
+import base64
 import pyotp
 import secrets
 import uuid
@@ -14,17 +16,14 @@ from pydantic import BaseModel, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 # Importa as tabelas da base de dados que estão no ficheiro models.py
-from fastapi import Depends
-from dependencies import validar_csrf
-# from dependencies import validar_csrf  <-- Importe a função que criámos
+from dependencies import validar_csrf, get_current_active_user
 
 # Importa a função que fornece a sessão da base de dados
 from database import get_db
 
 # Importações dos seus modelos e banco de dados
 from models import User, RefreshSession, DenylistToken, AuditLog, WebAuthnPasskey
-from database import get_db 
-from security_engine import SecurityEngine
+from security_engine import sec
 
 # Importações do WebAuthn (FIDO2)
 from webauthn import (
@@ -42,7 +41,6 @@ ORIGIN = "http://localhost:3000"
 challenge_cache = {}
 
 router = APIRouter(prefix="/api/v1/auth")
-sec = SecurityEngine()
 limiter = Limiter(key_func=get_remote_address)
 
 
@@ -88,6 +86,22 @@ class LoginRequest(BaseModel):
             raise ValueError("A senha não atende aos requisitos mínimos de complexidade.")
         return v
 
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    email: str | None = None
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_complexity(cls, v):
+        pattern = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{12,}$"
+        if not re.match(pattern, v):
+            raise ValueError("A senha não atende aos requisitos mínimos de complexidade.")
+        return v
+
+class TotpEnableRequest(BaseModel):
+    totp_code: str
+
 # ==========================================
 # 1. LOGIN BLINDADO (REQ-03, REQ-04, REQ-05, REQ-15)
 # ==========================================
@@ -131,33 +145,103 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
     ))
     db.commit()
 
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="strict", max_age=604800)
+    use_secure_cookie = os.getenv("ENVIRONMENT", "development").lower() == "production"
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=use_secure_cookie,
+        samesite="Lax",
+        max_age=604800,
+    )
     return {"access_token": access_jwt, "csrf_token": str(uuid.uuid4())}
 
 # ==========================================
-# 2. CONFIGURAÇÃO DO TOTP (REQ-12, REQ-13, REQ-14)
+# 2. REGISTRO DE USUÁRIO
+# ==========================================
+@router.post("/register")
+def register_endpoint(req: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+    existing = db.query(User).filter((User.username == req.username) | (User.email == req.email)).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Nome de usuário ou e-mail já registrado")
+
+    user_id = str(uuid.uuid4())
+    password_hash = sec.hash_password(req.password)
+    rsa_priv_encrypted, rsa_pub = sec.generate_user_rsa_keys(req.username)
+
+    user = User(
+        id=user_id,
+        username=req.username,
+        email=req.email.lower() if req.email else None,
+        password_hash=password_hash,
+        rsa_pub=rsa_pub,
+        rsa_priv_encrypted=rsa_priv_encrypted,
+        is_totp_enabled=False,
+        totp_secret=None,
+        backup_codes=None
+    )
+
+    db.add(user)
+    db.add(AuditLog(user_id=user_id, action="USER_REGISTERED", ip_address=request.client.host, user_agent=request.headers.get("user-agent", ""), details=json.dumps({"username": req.username})))
+    db.commit()
+
+    return {"message": "Usuário registrado com sucesso", "user_id": user_id}
+
+# ==========================================
+# 3. CONFIGURAÇÃO DO TOTP (REQ-12, REQ-13, REQ-14)
 # ==========================================
 @router.post("/totp/setup")
-def setup_totp(request: Request, db: Session = Depends(get_db)):
-    user_id = "uuid-do-banco" # Substituir pela extração real via JWT
-    user = db.query(User).filter(User.id == user_id).first()
+def setup_totp(request: Request, db: Session = Depends(get_db), current_user_id: str = Depends(get_current_active_user)):
+    user = db.query(User).filter(User.id == current_user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-    totp_secret = sec.generate_totp_secret() 
+    totp_secret = sec.generate_totp_secret()
     totp = pyotp.TOTP(totp_secret)
-    provisioning_uri = totp.provisioning_uri(name=user.username, issuer_name="Sistema de Assinaturas") 
+    provisioning_uri = totp.provisioning_uri(name=user.username, issuer_name="Sistema de Assinaturas")
 
     backup_codes = [secrets.token_hex(4) for _ in range(8)]
-    backup_codes_hashes = [sec.hash_password(code) for code in backup_codes] 
+    backup_codes_hashes = [sec.hash_password(code) for code in backup_codes]
 
     user.totp_secret = totp_secret
     user.backup_codes = json.dumps(backup_codes_hashes)
     db.commit()
 
+    qr_code_data_url = None
+    try:
+        import qrcode
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(provisioning_uri)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        qr_code_data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
+    except ImportError:
+        qr_code_data_url = None
+
     return {
         "secret": totp_secret,
-        "qr_code_uri": provisioning_uri, 
+        "qr_code_uri": provisioning_uri,
+        "qr_code_image": qr_code_data_url,
         "backup_codes": backup_codes
     }
+
+@router.post("/totp/enable")
+def enable_totp(req: TotpEnableRequest, request: Request, db: Session = Depends(get_db), current_user_id: str = Depends(get_current_active_user)):
+    user = db.query(User).filter(User.id == current_user_id).first()
+    if not user or not user.totp_secret:
+        raise HTTPException(status_code=400, detail="Configuração TOTP não encontrada")
+
+    if not sec.verify_totp(user.totp_secret, req.totp_code):
+        raise HTTPException(status_code=401, detail="Código TOTP inválido")
+
+    user.is_totp_enabled = True
+    db.commit()
+    db.add(AuditLog(user_id=current_user_id, action="TOTP_ENABLED", ip_address=request.client.host, user_agent=request.headers.get("user-agent", ""), details=json.dumps({"method": "totp"})))
+    db.commit()
+
+    return {"message": "Autenticação de dois fatores habilitada com sucesso"}
 
 # ==========================================
 # 3. WEBAUTHN - REGISTRO DE DISPOSITIVO (REQ-06, REQ-07)

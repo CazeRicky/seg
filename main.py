@@ -27,7 +27,7 @@ app.include_router(auth.router)
 # ---------- PROTEÇÃO CORS ----------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://front-oficial.com"], 
+    allow_origins=["https://front-oficial.com", "http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
@@ -59,7 +59,6 @@ async def global_exception_handler(request: Request, exc: Exception):
             "timestamp": datetime.utcnow().isoformat()
         }
     )
-app = FastAPI(title="Sistema de Assinaturas", version="1.0", docs_url="/api/v1/docs")
 # Registra o Rate Limiter na aplicação
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

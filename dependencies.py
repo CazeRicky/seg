@@ -3,10 +3,7 @@ import jwt
 from sqlalchemy.orm import Session
 from models import DenylistToken
 from database import get_db
-from security_engine import SecurityEngine
-
-# Instância do nosso motor de segurança para aceder à chave pública
-sec = SecurityEngine()
+from security_engine import sec
 
 def validar_csrf(request: Request):
     """

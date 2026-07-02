@@ -129,3 +129,6 @@ class SecurityEngine:
     def generate_refresh_token(self) -> str:
         # Defesa: REQ-19. Gera um UUID opaco v7 (ordenável) para a sessão longa
         return str(uuid7())
+
+# Instância singleton que mantém as mesmas chaves RSA durante a execução do processo
+sec = SecurityEngine()
