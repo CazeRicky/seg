@@ -3,19 +3,19 @@ from sqlalchemy.orm import Session
 import uuid
 from datetime import datetime
 
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
 from database import get_db
 from models import User, DocumentSignature
 from pdf_engine import PDFSecurityEngine
 from security_engine import SecurityEngine
-from dependencies import validar_csrf
+from dependencies import validar_csrf, get_current_active_user
 
 router = APIRouter(prefix="/api/v1/pdf", tags=["Documentos"])
 pdf_sec = PDFSecurityEngine()
 sec = SecurityEngine()
-
-# Dependência simulada para extrair o utilizador autenticado do token JWT
-def get_current_user_id():
-    return "uuid-do-banco" # No projeto final, isto deve descodificar o JWT e devolver o ID
+limiter = Limiter(key_func=get_remote_address)
 
 # ==========================================
 # ROTA 1: ASSINAR DOCUMENTO (REQ-48 e REQ-49)
@@ -23,13 +23,13 @@ def get_current_user_id():
 @router.post("/sign", dependencies=[Depends(validar_csrf)])
 async def sign_pdf_endpoint(
     request: Request,
-    file: UploadFile = File(...), 
-    coord_x: int = Form(100), 
+    file: UploadFile = File(...),
+    coord_x: int = Form(100),
     coord_y: int = Form(100),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user_id: str = Depends(get_current_active_user),
 ):
-    user_id = get_current_user_id()
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == current_user_id).first()
     
     if not user.rsa_priv_encrypted:
         raise HTTPException(status_code=400, detail="Utilizador não possui certificado digital.")
@@ -72,8 +72,8 @@ async def sign_pdf_endpoint(
 # ==========================================
 # ROTA 2: VERIFICAÇÃO PÚBLICA (REQ-50 a REQ-54)
 # ==========================================
-@router.post("/verify")
-# Aqui também deve colocar o @limiter.limit("5/minute") para cumprir o REQ-53!
+@router.post("/verify", dependencies=[Depends(validar_csrf)])
+@limiter.limit("5/minute")
 async def verify_pdf_endpoint(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
     Defesa: REQ-54 - O PDF é processado em memória e nunca é guardado no disco.

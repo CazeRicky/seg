@@ -13,7 +13,13 @@ def validar_csrf(request: Request):
     referer = request.headers.get("referer")
     
     # Adicione aqui os domínios permitidos (devem coincidir com o CORS do main.py)
-    origens_permitidas = ["https://front-oficial.com", "http://localhost:3000"]
+    origens_permitidas = [
+        "https://front-oficial.com",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
     
     origem_cliente = origem or referer
     
@@ -30,6 +36,15 @@ def validar_csrf(request: Request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "SEC_002", "message": "Tentativa de CSRF bloqueada: Origem não autorizada"}
+        )
+
+    csrf_header = request.headers.get("x-csrf-token")
+    csrf_cookie = request.cookies.get("csrf_token")
+
+    if not csrf_header or not csrf_cookie or csrf_header != csrf_cookie:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "SEC_003", "message": "Token CSRF inválido ou ausente"}
         )
 
 def get_current_active_user(request: Request, db: Session = Depends(get_db)):

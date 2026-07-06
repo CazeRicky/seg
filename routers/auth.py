@@ -12,7 +12,7 @@ from email.message import EmailMessage
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Response, HTTPException, status, Depends
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, EmailStr, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 # Importa as tabelas da base de dados que estão no ficheiro models.py
@@ -89,7 +89,7 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     username: str
     password: str
-    email: str | None = None
+    email: EmailStr
 
     @field_validator('password')
     @classmethod
@@ -101,6 +101,9 @@ class RegisterRequest(BaseModel):
 
 class TotpEnableRequest(BaseModel):
     totp_code: str
+
+def generate_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
 
 # ==========================================
 # 1. LOGIN BLINDADO (REQ-03, REQ-04, REQ-05, REQ-15)
@@ -128,6 +131,13 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
     user.failed_login_attempts = 0
     db.commit()
 
+    if user.email:
+        enviar_email_notificacao(
+            user.email,
+            "Novo login detectado",
+            f"Um novo login foi realizado para sua conta em {datetime.utcnow().isoformat()} de {request.client.host}."
+        )
+
     if user.is_totp_enabled:
         if not req.totp_code or not sec.verify_totp(user.totp_secret, req.totp_code):
             db.add(AuditLog(user_id=user.id, action="LOGIN_FAILED_2FA", ip_address=request.client.host))
@@ -146,6 +156,8 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
     db.commit()
 
     use_secure_cookie = os.getenv("ENVIRONMENT", "development").lower() == "production"
+    csrf_token = generate_csrf_token()
+
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
@@ -154,14 +166,32 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
         samesite="Lax",
         max_age=604800,
     )
-    return {"access_token": access_jwt, "csrf_token": str(uuid.uuid4())}
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=use_secure_cookie,
+        samesite="Lax",
+        max_age=604800,
+    )
+
+    return {
+        "access_token": access_jwt,
+        "csrf_token": csrf_token,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "is_totp_enabled": user.is_totp_enabled,
+        }
+    }
 
 # ==========================================
 # 2. REGISTRO DE USUÁRIO
 # ==========================================
 @router.post("/register")
 def register_endpoint(req: RegisterRequest, request: Request, db: Session = Depends(get_db)):
-    existing = db.query(User).filter((User.username == req.username) | (User.email == req.email)).first()
+    existing = db.query(User).filter((User.username == req.username) | (User.email == req.email.lower())).first()
     if existing:
         raise HTTPException(status_code=409, detail="Nome de usuário ou e-mail já registrado")
 
@@ -172,7 +202,7 @@ def register_endpoint(req: RegisterRequest, request: Request, db: Session = Depe
     user = User(
         id=user_id,
         username=req.username,
-        email=req.email.lower() if req.email else None,
+        email=req.email.lower(),
         password_hash=password_hash,
         rsa_pub=rsa_pub,
         rsa_priv_encrypted=rsa_priv_encrypted,
@@ -185,7 +215,22 @@ def register_endpoint(req: RegisterRequest, request: Request, db: Session = Depe
     db.add(AuditLog(user_id=user_id, action="USER_REGISTERED", ip_address=request.client.host, user_agent=request.headers.get("user-agent", ""), details=json.dumps({"username": req.username})))
     db.commit()
 
-    return {"message": "Usuário registrado com sucesso", "user_id": user_id}
+    if user.email:
+        enviar_email_notificacao(
+            user.email,
+            "Bem-vindo ao SecureSign",
+            f"Sua conta foi criada com sucesso com o usuário {user.username}."
+        )
+
+    return {
+        "message": "Usuário registrado com sucesso",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "is_totp_enabled": user.is_totp_enabled,
+        }
+    }
 
 # ==========================================
 # 3. CONFIGURAÇÃO DO TOTP (REQ-12, REQ-13, REQ-14)
@@ -240,6 +285,13 @@ def enable_totp(req: TotpEnableRequest, request: Request, db: Session = Depends(
     db.commit()
     db.add(AuditLog(user_id=current_user_id, action="TOTP_ENABLED", ip_address=request.client.host, user_agent=request.headers.get("user-agent", ""), details=json.dumps({"method": "totp"})))
     db.commit()
+
+    if user.email:
+        enviar_email_notificacao(
+            user.email,
+            "2FA habilitado",
+            "A autenticação de dois fatores foi habilitada em sua conta. Se você não reconhece essa ação, entre em contato com o administrador."
+        )
 
     return {"message": "Autenticação de dois fatores habilitada com sucesso"}
 
@@ -355,7 +407,7 @@ def webauthn_auth_verify(req_data: dict, request: Request, response: Response, d
 # ==========================================
 # 5. ROTA DE REFRESH COM ROTAÇÃO (REQ-29/30)
 # ==========================================
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(validar_csrf)])
 def refresh_token_endpoint(request: Request, response: Response, db: Session = Depends(get_db)):
     old_refresh = request.cookies.get("refresh_token")
     if not old_refresh: raise HTTPException(status_code=401, detail="Refresh token ausente")
@@ -375,8 +427,20 @@ def refresh_token_endpoint(request: Request, response: Response, db: Session = D
     db.commit()
     
     new_access, _ = sec.generate_access_token(session_db.user_id, request.client.host, "", "new_session_id")
+    csrf_token = generate_csrf_token()
     response.set_cookie(key="refresh_token", value=new_refresh, httponly=True, secure=True, samesite="strict", max_age=604800)
-    return {"access_token": new_access}
+    response.set_cookie(key="csrf_token", value=csrf_token, httponly=False, secure=True, samesite="strict", max_age=604800)
+    user = db.query(User).filter(User.id == session_db.user_id).first()
+    return {
+        "access_token": new_access,
+        "csrf_token": csrf_token,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "is_totp_enabled": user.is_totp_enabled,
+        },
+    }
 
 # ==========================================
 # 6. LOGOUT E DENYLIST (REQ-21/23)

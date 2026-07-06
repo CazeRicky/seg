@@ -8,7 +8,7 @@ const initialActivity = [
 
 const navItems = ["Dashboard", "Security & 2FA", "Public Verification"];
 const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,}$/;
-const API_BASE = process.env.REACT_APP_API_BASE_URL || "http://localhost:8000/api/v1";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
 
 export default function MainDashboard() {
   const canvasRef = useRef(null);
@@ -35,7 +35,7 @@ export default function MainDashboard() {
   const [isDrawing, setIsDrawing] = useState(false);
   const [signatureSaved, setSignatureSaved] = useState(false);
   const [signaturePreview, setSignaturePreview] = useState(null);
-  const [verificationHash, setVerificationHash] = useState("");
+  const [verificationFile, setVerificationFile] = useState(null);
   const [verificationResult, setVerificationResult] = useState(null);
   const [accessToken, setAccessToken] = useState("");
   const [csrfToken, setCsrfToken] = useState("");
@@ -44,6 +44,7 @@ export default function MainDashboard() {
   const [backupCodes, setBackupCodes] = useState([]);
   const [signedPdfUrl, setSignedPdfUrl] = useState(null);
   const [signedPdfName, setSignedPdfName] = useState("");
+  const [refreshingSession, setRefreshingSession] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -53,6 +54,17 @@ export default function MainDashboard() {
     context.lineJoin = "round";
     context.lineWidth = 2;
     context.strokeStyle = "#00E676";
+  }, []);
+
+  useEffect(() => {
+    const restore = async () => {
+      try {
+        await refreshSession();
+      } catch (error) {
+        // Ignore initial restore failures; o usuário pode não ter sessão válida.
+      }
+    };
+    restore();
   }, []);
 
   useEffect(() => {
@@ -117,10 +129,18 @@ export default function MainDashboard() {
     setStatusMessage("Assinatura salva e vinculada ao documento.");
   };
 
+  const getCsrfTokenFromCookie = () => {
+    const match = document.cookie.match(/(^|;)\s*csrf_token=([^;]+)/);
+    return match ? decodeURIComponent(match[2]) : "";
+  };
+
   const apiFetch = async (path, options = {}) => {
-    const defaultHeaders = { "Content-Type": "application/json" };
+    const isFormData = options.body instanceof FormData;
+    const defaultHeaders = isFormData ? {} : { "Content-Type": "application/json" };
     const authHeaders = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
-    const headers = { ...defaultHeaders, ...authHeaders, ...(options.headers || {}) };
+    const csrfTokenValue = csrfToken || getCsrfTokenFromCookie();
+    const csrfHeaders = csrfTokenValue ? { "X-CSRF-Token": csrfTokenValue } : {};
+    const headers = { ...defaultHeaders, ...authHeaders, ...csrfHeaders, ...(options.headers || {}) };
     const response = await fetch(`${API_BASE}${path}`, {
       credentials: "include",
       ...options,
@@ -135,11 +155,65 @@ export default function MainDashboard() {
       body = text;
     }
 
+    const isRetryable =
+      response.status === 401 &&
+      accessToken &&
+      !["/auth/refresh", "/auth/logout", "/auth/login", "/auth/register", "/auth/totp/setup", "/auth/totp/enable"].includes(path);
+
+    if (isRetryable) {
+      try {
+        await refreshSession();
+        return apiFetch(path, options);
+      } catch (retryError) {
+        throw body || new Error(response.statusText);
+      }
+    }
+
     if (!response.ok) {
       throw body || new Error(response.statusText);
     }
 
     return body;
+  };
+
+  const refreshSession = async () => {
+    if (refreshingSession) return;
+    setRefreshingSession(true);
+
+    try {
+      const csrfTokenValue = csrfToken || getCsrfTokenFromCookie();
+      const data = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          ...(csrfTokenValue ? { "X-CSRF-Token": csrfTokenValue } : {}),
+        },
+      });
+
+      if (!data.ok) {
+        throw new Error("Sessão não restaurada");
+      }
+
+      const body = await data.json();
+      setAccessToken(body.access_token || "");
+      setCsrfToken(body.csrf_token || "");
+      if (body.user) {
+        setCurrentUser({
+          id: body.user.id,
+          username: body.user.username,
+          email: body.user.email,
+          name: body.user.username,
+          is_totp_enabled: body.user.is_totp_enabled,
+        });
+        setIsAuthenticated(true);
+        setStatusMessage(`Sessão restaurada. Bem-vindo de volta, ${body.user.username}.`);
+      }
+
+      return body;
+    } finally {
+      setRefreshingSession(false);
+    }
   };
 
   const handleAuthSubmit = async (event) => {
@@ -217,7 +291,22 @@ export default function MainDashboard() {
 
       setAccessToken(data.access_token);
       setCsrfToken(data.csrf_token || "");
-      setCurrentUser({ username: email.trim().toLowerCase(), email: email.trim().toLowerCase() });
+      setCurrentUser(
+        data.user
+          ? {
+              id: data.user.id,
+              username: data.user.username,
+              email: data.user.email,
+              name: data.user.username,
+              is_totp_enabled: data.user.is_totp_enabled,
+            }
+          : {
+              username: email.trim().toLowerCase(),
+              email: email.trim().toLowerCase(),
+              name: email.trim().toLowerCase(),
+              is_totp_enabled: false,
+            }
+      );
       setIsAuthenticated(true);
       setTwoFactorRequired(false);
       setTotpCode("");
@@ -272,6 +361,7 @@ export default function MainDashboard() {
       setSuccessMessage("Autenticação de dois fatores habilitada com sucesso.");
       setTwoFactorRequired(false);
       setTotpCode("");
+      setCurrentUser((current) => current ? { ...current, is_totp_enabled: true } : current);
     } catch (error) {
       setAuthError(error?.detail?.message || error?.message || "Falha ao habilitar TOTP.");
     }
@@ -309,129 +399,6 @@ export default function MainDashboard() {
     }
   };
 
-  const createSignedPdf = async (file, signerName, hash, signatureDataUrl) => {
-    const safeName = (file?.name || "documento.pdf").replace(/[^a-zA-Z0-9.-]+/g, "_");
-    const pdfBytes = await file.arrayBuffer();
-
-    const module = await import("https://cdn.jsdelivr.net/npm/pdf-lib/dist/pdf-lib.esm.min.js");
-    const { PDFDocument, StandardFonts, rgb } = module;
-    const pdfDoc = await PDFDocument.load(pdfBytes);
-    const pages = pdfDoc.getPages();
-    const firstPage = pages[0];
-    const { width, height } = firstPage.getSize();
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-
-    const footerHeight = 140;
-    const boxX = 40;
-    const boxY = 40;
-    const boxWidth = width - boxX * 2;
-    const boxHeight = footerHeight;
-
-    firstPage.drawRectangle({
-      x: boxX,
-      y: boxY,
-      width: boxWidth,
-      height: boxHeight,
-      color: rgb(1, 1, 1),
-      borderColor: rgb(0, 0.8, 0.24),
-      borderWidth: 1,
-    });
-
-    firstPage.drawText(`Assinante: ${signerName}`, {
-      x: boxX + 12,
-      y: boxY + boxHeight - 26,
-      size: 11,
-      font,
-      color: rgb(0.07, 0.11, 0.18),
-    });
-    firstPage.drawText(`Hash: ${hash}`, {
-      x: boxX + 12,
-      y: boxY + boxHeight - 44,
-      size: 10,
-      font,
-      color: rgb(0.07, 0.11, 0.18),
-    });
-    firstPage.drawText(`Data: ${new Date().toLocaleString("pt-BR")}`, {
-      x: boxX + 12,
-      y: boxY + boxHeight - 62,
-      size: 10,
-      font,
-      color: rgb(0.07, 0.11, 0.18),
-    });
-    firstPage.drawText("Documento assinado digitalmente", {
-      x: boxX + 12,
-      y: boxY + boxHeight - 84,
-      size: 12,
-      font: fontBold,
-      color: rgb(0, 0.5, 0),
-    });
-
-    if (signatureDataUrl) {
-      try {
-        const signatureImage = await pdfDoc.embedPng(signatureDataUrl);
-        const sigWidth = 170;
-        const sigHeight = (signatureImage.height / signatureImage.width) * sigWidth;
-        firstPage.drawImage(signatureImage, {
-          x: width - sigWidth - 40,
-          y: boxY + 12,
-          width: sigWidth,
-          height: sigHeight,
-        });
-      } catch (error) {
-        console.warn("Não foi possível embutir a assinatura como imagem:", error);
-      }
-    }
-
-    firstPage.drawText("ASSINADO", {
-      x: width - 160,
-      y: boxY + boxHeight - 28,
-      size: 16,
-      font: fontBold,
-      color: rgb(0.05, 0.5, 0.15),
-    });
-
-    const signaturePage = pdfDoc.addPage([width, height]);
-    signaturePage.drawText("Detalhes da assinatura", {
-      x: 40,
-      y: height - 60,
-      size: 18,
-      font: fontBold,
-      color: rgb(0, 0.2, 0.4),
-    });
-    signaturePage.drawText(`Documento original: ${safeName}`, {
-      x: 40,
-      y: height - 90,
-      size: 12,
-      font,
-      color: rgb(0.07, 0.11, 0.18),
-    });
-    signaturePage.drawText(`Assinante: ${signerName}`, {
-      x: 40,
-      y: height - 110,
-      size: 12,
-      font,
-      color: rgb(0.07, 0.11, 0.18),
-    });
-    signaturePage.drawText(`Hash: ${hash}`, {
-      x: 40,
-      y: height - 130,
-      size: 12,
-      font,
-      color: rgb(0.07, 0.11, 0.18),
-    });
-    signaturePage.drawText(`Data: ${new Date().toLocaleString("pt-BR")}`, {
-      x: 40,
-      y: height - 150,
-      size: 12,
-      font,
-      color: rgb(0.07, 0.11, 0.18),
-    });
-
-    const pdfBytesSigned = await pdfDoc.save();
-    return new Blob([pdfBytesSigned], { type: "application/pdf" });
-  };
-
   const handleSign = async () => {
     if (!signatureSaved) {
       setStatusMessage("Desenhe e salve sua assinatura antes de assinar o documento.");
@@ -443,28 +410,52 @@ export default function MainDashboard() {
     }
 
     setIsSigning(true);
-    setStatusMessage("Aplicando assinatura criptográfica e registro auditável...");
+    setStatusMessage("Enviando documento para assinatura no servidor...");
 
     try {
-      const signedHash = `0x${Math.random().toString(16).slice(2, 8).toUpperCase()}...`;
-      const signedPdfBlob = await createSignedPdf(uploadedFile, currentUser?.username || "Usuário", signedHash, signaturePreview);
+      const headers = {};
+      if (accessToken) {
+        headers.Authorization = `Bearer ${accessToken}`;
+      }
+      if (csrfToken) {
+        headers["X-CSRF-Token"] = csrfToken;
+      }
+
+      const formData = new FormData();
+      formData.append("file", uploadedFile);
+      formData.append("coord_x", String(xCoordinate));
+      formData.append("coord_y", String(yCoordinate));
+
+      const response = await fetch(`${API_BASE}/pdf/sign`, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || "Falha na assinatura do servidor.");
+      }
+
+      const signedPdfBlob = await response.blob();
       const signedPdfUrlValue = window.URL.createObjectURL(signedPdfBlob);
       setSignedPdfUrl(signedPdfUrlValue);
       setSignedPdfName(`assinado-${(uploadedFile.name || "documento.pdf").replace(/\.pdf$/i, "")}.pdf`);
       setSignatureCount((count) => count + 1);
       setActivity((current) => [
         {
-          hash: signedHash,
+          hash: `0x${Math.random().toString(16).slice(2, 8).toUpperCase()}...`,
           date: new Date().toLocaleString("pt-BR"),
           status: "Assinado",
           detail: uploadedFile?.name || "Documento PDF",
         },
         ...current.slice(0, 2),
       ]);
-      setStatusMessage("Documento assinado com sucesso. PDF pronto para download.");
+      setStatusMessage("Documento assinado com sucesso pelo servidor. PDF pronto para download.");
     } catch (error) {
-      setStatusMessage("Falha ao assinar o documento. Tente novamente.");
       console.error(error);
+      setStatusMessage("Falha ao assinar o documento. Tente novamente.");
     } finally {
       setIsSigning(false);
     }
@@ -486,55 +477,62 @@ export default function MainDashboard() {
   };
 
   const handleRegenerate2FA = () => {
-    const nextCode = String(100000 + Math.floor(Math.random() * 900000)).padStart(6, "0");
-    if (currentUser) {
-      const updatedUser = { ...currentUser, totpCode: nextCode };
-      setCurrentUser(updatedUser);
-      setRegisteredUsers((users) => users.map((user) => (user.id === updatedUser.id ? updatedUser : user)));
-      setStatusMessage(`Novo código 2FA gerado para ${updatedUser.name}.`);
+    if (!accessToken) {
+      setStatusMessage("Faça login para acessar as configurações de 2FA.");
       return;
     }
-    setStatusMessage("Faça login para regenerar o código 2FA.");
+    setStatusMessage("O aplicativo de autenticação deve gerar o código. Use a função TOTP no seu Authenticator móvel.");
   };
 
-  const handleVerify = () => {
-    const normalizedHash = verificationHash.trim().toUpperCase();
-    if (!normalizedHash) {
+  const handleVerify = async () => {
+    if (!verificationFile) {
       setVerificationResult(null);
-      setStatusMessage("Informe um hash para validar a assinatura.");
+      setStatusMessage("Selecione um PDF para verificar a assinatura.");
       return;
     }
 
-    const match = activity.find((entry) => entry.hash.toUpperCase().includes(normalizedHash));
-    if (match) {
+    setStatusMessage("Enviando arquivo para verificação...");
+
+    try {
+      const headers = {};
+      if (csrfToken) {
+        headers["X-CSRF-Token"] = csrfToken;
+      }
+
+      const formData = new FormData();
+      formData.append("file", verificationFile);
+
+      const response = await fetch(`${API_BASE}/pdf/verify`, {
+        method: "POST",
+        credentials: "include",
+        headers,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || "Falha ao verificar o documento.");
+      }
+
+      const data = await response.json();
       setVerificationResult({
-        hash: normalizedHash,
-        status: match.status,
-        detail: match.detail,
-        date: match.date,
+        hash: data.original_hash || "-",
+        status: data.status || "VALID",
+        detail: data.message || "Documento verificado com sucesso.",
+        date: data.signed_at || new Date().toLocaleString("pt-BR"),
         verified: true,
       });
-      setStatusMessage(`Verificação concluída para ${normalizedHash}.`);
-      return;
+      setStatusMessage("Verificação concluída com sucesso.");
+    } catch (error) {
+      console.error(error);
+      setVerificationResult({
+        hash: verificationFile.name,
+        status: "Não verificado",
+        detail: error.message || "Falha na verificação.",
+        date: "-",
+        verified: false,
+      });
+      setStatusMessage("Falha ao verificar o documento. Verifique o PDF ou tente novamente.");
     }
-
-    setVerificationResult({
-      hash: normalizedHash,
-      status: "Não verificado",
-      detail: "Nenhum registro encontrado para esse hash.",
-      date: "-",
-      verified: false,
-    });
-    setStatusMessage("Nenhum registro encontrado para o hash informado.");
-  };
-  const handleLogout = () => {
-    setIsAuthenticated(false);
-    setCurrentUser(null);
-    setPendingUser(null);
-    setTwoFactorRequired(false);
-    setActiveNav("Dashboard");
-    resetAuthForm();
-    setStatusMessage("Sess�o encerrada. Fa�a login para continuar.");
   };
 
   if (!isAuthenticated) {
@@ -774,15 +772,15 @@ export default function MainDashboard() {
             <section className="mb-6 rounded-2xl border border-gray-800 bg-[#161B22]/80 p-5 shadow-[0_0_35px_rgba(0,0,0,0.2)]">
               <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div>
-                  <p className="text-sm font-medium text-emerald-400">Seguran�a</p>
-                  <h2 className="text-xl font-semibold text-white">Autentica��o de dois fatores</h2>
+                  <p className="text-sm font-medium text-emerald-400">Segurança</p>
+                  <h2 className="text-xl font-semibold text-white">Autenticação de dois fatores</h2>
                   <p className="mt-2 text-sm text-slate-400">
-                    O fluxo agora exige um c�digo TOTP ap�s a senha, simulando o requisito de seguran�a do projeto.
+                    O fluxo exige um código TOTP após a senha e usa a configuração de QR code fornecida pelo servidor.
                   </p>
                 </div>
                 <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
-                  <p className="font-semibold">C�digo 2FA ativo</p>
-                  <p className="mt-1 text-emerald-100/80">{currentUser?.totpCode || "123456"}</p>
+                  <p className="font-semibold">TOTP habilitado</p>
+                  <p className="mt-1 text-emerald-100/80">{currentUser?.is_totp_enabled ? "Sim" : "Não"}</p>
                 </div>
               </div>
             </section>
@@ -799,8 +797,8 @@ export default function MainDashboard() {
                   </p>
                 </div>
                 <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
-                  <p className="font-semibold">Código 2FA ativo</p>
-                  <p className="mt-1 text-emerald-100/80">{currentUser?.totpCode || "123456"}</p>
+                  <p className="font-semibold">TOTP habilitado</p>
+                  <p className="mt-1 text-emerald-100/80">{currentUser?.is_totp_enabled ? "Sim" : "Não"}</p>
                 </div>
               </div>
 
@@ -809,24 +807,58 @@ export default function MainDashboard() {
                   <h3 className="text-lg font-semibold text-white">Status da autenticação</h3>
                   <ul className="mt-4 space-y-3 text-sm text-slate-400">
                     <li>• Login protegido por senha e verificação adicional.</li>
-                    <li>• O código TOTP é exibido para a sessão atual.</li>
-                    <li>• Você pode regenerar o código para simular uma rotação segura.</li>
+                    <li>• O TOTP é configurado no servidor e verificado durante o login.</li>
+                    <li>• O aplicativo de autenticação do usuário gera códigos válidos de 30 segundos.</li>
                   </ul>
                 </div>
                 <div className="rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
                   <h3 className="text-lg font-semibold text-white">Ações rápidas</h3>
                   <button
                     type="button"
-                    onClick={handleRegenerate2FA}
+                    onClick={handleTotpSetup}
                     className="mt-4 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-300"
                   >
-                    Regenerar código 2FA
+                    Gerar QR code TOTP
+                  </button>
+                  <div className="mt-4">
+                    <label className="mb-2 block text-sm font-medium text-slate-300">Código TOTP</label>
+                    <input
+                      type="text"
+                      value={totpCode}
+                      onChange={(event) => setTotpCode(event.target.value)}
+                      className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+                      placeholder="123456"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleTotpEnable}
+                    className="mt-4 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-300"
+                  >
+                    Habilitar TOTP
                   </button>
                   <p className="mt-3 text-sm text-slate-400">
-                    O campo de autenticação agora acompanha a mudança do código do usuário logado.
+                    Depois de escanear o QR code, insira o código do app para habilitar a autenticação de dois fatores.
                   </p>
                 </div>
               </div>
+              {qrCodeImage && (
+                <div className="mt-6 rounded-2xl border border-emerald-400/20 bg-[#0D1117]/70 p-4 text-sm text-slate-200">
+                  <p className="font-semibold text-white">QR code de configuração</p>
+                  <p className="mt-3 text-slate-400">Escaneie este QR code com o app Authenticator do seu dispositivo.</p>
+                  <img src={qrCodeImage} alt="QR code TOTP" className="mt-4 max-w-full rounded-xl border border-gray-800 bg-white p-3" />
+                  {backupCodes.length > 0 && (
+                    <div className="mt-4 rounded-xl border border-gray-800 bg-[#161B22]/80 p-3 text-slate-300">
+                      <p className="font-semibold text-white">Códigos de backup</p>
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-slate-300">
+                        {backupCodes.map((code) => (
+                          <li key={code}>{code}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
           ) : activeNav === "Public Verification" ? (
             <section className="mb-6 rounded-2xl border border-gray-800 bg-[#161B22]/80 p-5 shadow-[0_0_35px_rgba(0,0,0,0.2)]">
@@ -835,7 +867,7 @@ export default function MainDashboard() {
                   <p className="text-sm font-medium text-emerald-400">Verificação pública</p>
                   <h2 className="text-xl font-semibold text-white">Validar assinatura digital</h2>
                   <p className="mt-2 text-sm text-slate-400">
-                    Informe um hash ou identificador para consultar o estado da assinatura no ledger simulado.
+                    Envie o PDF para o servidor validar sua assinatura e integridade com base no histórico de registros.
                   </p>
                 </div>
                 <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
@@ -846,13 +878,12 @@ export default function MainDashboard() {
 
               <div className="mt-6 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
                 <div className="rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
-                  <label className="mb-2 block text-sm font-medium text-slate-300">Hash / identificador</label>
+                  <label className="mb-2 block text-sm font-medium text-slate-300">PDF para verificação</label>
                   <input
-                    type="text"
-                    value={verificationHash}
-                    onChange={(event) => setVerificationHash(event.target.value)}
+                    type="file"
+                    accept="application/pdf"
+                    onChange={(event) => setVerificationFile(event.target.files?.[0] || null)}
                     className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
-                    placeholder="0x8A1F..."
                   />
                   <button
                     type="button"
