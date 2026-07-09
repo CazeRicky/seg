@@ -45,6 +45,9 @@ export default function MainDashboard() {
   const [signedPdfUrl, setSignedPdfUrl] = useState(null);
   const [signedPdfName, setSignedPdfName] = useState("");
   const [refreshingSession, setRefreshingSession] = useState(false);
+  const [allSessions, setAllSessions] = useState([]);
+  const [showActiveSessions, setShowActiveSessions] = useState(false);
+  const [loadingSessions, setLoadingSessions] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -385,13 +388,57 @@ export default function MainDashboard() {
     setStatusMessage("Sessão encerrada. Faça login para continuar.");
   };
 
+  // REQ-57: Gerenciamento de Sessões Ativas
+  const loadActiveSessions = async () => {
+    try {
+      setLoadingSessions(true);
+      const response = await apiFetch("/auth/sessions", { method: "GET" });
+      setAllSessions(response.sessions || []);
+      setShowActiveSessions(true);
+      setStatusMessage("✓ Sessões ativas carregadas");
+    } catch (error) {
+      setAuthError(`Erro ao carregar sessões: ${error?.detail?.message || error?.message}`);
+    } finally {
+      setLoadingSessions(false);
+    }
+  };
+
+  const revokeSpecificSession = async (sessionId) => {
+    try {
+      await apiFetch(`/auth/sessions/${sessionId}/revoke`, { method: "POST" });
+      setAllSessions((current) => current.filter((s) => s.id !== sessionId));
+      setStatusMessage("✓ Sessão encerrada com sucesso");
+    } catch (error) {
+      setAuthError(`Erro ao revogar sessão: ${error?.detail?.message || error?.message}`);
+    }
+  };
+
+  const revokeAllSessions = async () => {
+    try {
+      if (!confirm("Tem certeza? Isso encerrará todas as suas outras sessões.")) return;
+      await apiFetch("/auth/sessions/revoke-all", { method: "POST" });
+      setAllSessions([]);
+      setStatusMessage("✓ Todas as outras sessões foram encerradas");
+    } catch (error) {
+      setAuthError(`Erro ao revogar sessões: ${error?.detail?.message || error?.message}`);
+    }
+  };
+
   const handleFileChange = (event) => {
     const file = event.target.files?.[0];
     if (file) {
+      // REQ-61: Validar tamanho máximo de 20MB
+      const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB em bytes
+      if (file.size > MAX_FILE_SIZE) {
+        setStatusMessage(`❌ Arquivo excede o limite de 20MB (tamanho atual: ${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+        setAuthError("O arquivo é muito grande. O limite máximo é 20MB.");
+        return;
+      }
       setUploadedFile(file);
       setSignedPdfUrl(null);
       setSignedPdfName("");
-      setStatusMessage(`Arquivo selecionado: ${file.name}`);
+      setStatusMessage(`✓ Arquivo selecionado: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+      setAuthError(""); // Limpar erros anteriores
       setActivity((current) => [
         { hash: "0xNEW...1A2B", date: new Date().toLocaleString("pt-BR"), status: "Em análise", detail: file.name },
         ...current.slice(0, 2),
@@ -856,6 +903,69 @@ export default function MainDashboard() {
                         ))}
                       </ul>
                     </div>
+                  )}
+                </div>
+              )}
+              
+              {/* REQ-57: Gerenciamento de Sessões Ativas */}
+              <div className="mt-6 rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
+                <h3 className="text-lg font-semibold text-white">Gerenciamento de Sessões</h3>
+                <p className="mt-2 text-sm text-slate-400">Visualize e gerencie suas sessões ativas em outros dispositivos.</p>
+                <button
+                  type="button"
+                  onClick={loadActiveSessions}
+                  disabled={loadingSessions}
+                  className="mt-4 rounded-xl border border-blue-400/30 bg-blue-500/10 px-4 py-2 text-sm font-semibold text-blue-300 disabled:opacity-50"
+                >
+                  {loadingSessions ? "Carregando..." : "Ver Sessões Ativas"}
+                </button>
+              </div>
+              
+              {showActiveSessions && (
+                <div className="mt-6 rounded-2xl border border-blue-400/20 bg-[#0D1117]/70 p-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-semibold text-white">Sessões Ativas ({allSessions.length})</h3>
+                    <button
+                      type="button"
+                      onClick={() => setShowActiveSessions(false)}
+                      className="text-sm text-slate-400 hover:text-slate-200"
+                    >
+                      ✕ Fechar
+                    </button>
+                  </div>
+                  <p className="mt-2 text-sm text-slate-400">Clique em uma sessão para encerrar ou use o botão abaixo para sair de todos os dispositivos.</p>
+                  
+                  {allSessions.length === 0 ? (
+                    <p className="mt-4 text-sm text-slate-400">Nenhuma outra sessão ativa.</p>
+                  ) : (
+                    <div className="mt-4 space-y-2">
+                      {allSessions.map((session) => (
+                        <div key={session.id} className="flex items-center justify-between rounded-lg border border-gray-700 bg-[#161B22]/50 px-3 py-2">
+                          <div className="flex-1">
+                            <p className="text-sm font-medium text-white">{session.ip_address}</p>
+                            <p className="text-xs text-slate-400">{session.user_agent?.substring(0, 40)}...</p>
+                            <p className="text-xs text-slate-500">Expira: {new Date(session.expires_at).toLocaleString("pt-BR")}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => revokeSpecificSession(session.id)}
+                            className="ml-2 rounded px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/20"
+                          >
+                            Encerrar
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  
+                  {allSessions.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={revokeAllSessions}
+                      className="mt-4 w-full rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-300"
+                    >
+                      Sair de Todos os Dispositivos
+                    </button>
                   )}
                 </div>
               )}

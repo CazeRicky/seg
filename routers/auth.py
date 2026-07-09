@@ -94,7 +94,7 @@ class RegisterRequest(BaseModel):
     @field_validator('password')
     @classmethod
     def validate_password_complexity(cls, v):
-        pattern = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{12,}$"
+        pattern = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{12,}$"p
         if not re.match(pattern, v):
             raise ValueError("A senha não atende aos requisitos mínimos de complexidade.")
         return v
@@ -299,9 +299,10 @@ def enable_totp(req: TotpEnableRequest, request: Request, db: Session = Depends(
 # 3. WEBAUTHN - REGISTRO DE DISPOSITIVO (REQ-06, REQ-07)
 # ==========================================
 @router.post("/webauthn/register/generate")
-def webauthn_register_generate(request: Request, db: Session = Depends(get_db)):
-    user_id = "uuid-do-banco" # Substituir pela extração real via JWT
-    user = db.query(User).filter(User.id == user_id).first()
+def webauthn_register_generate(current_user_id: str = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == current_user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
     options = generate_registration_options(
         rp_id=RP_ID,
@@ -314,9 +315,8 @@ def webauthn_register_generate(request: Request, db: Session = Depends(get_db)):
     return json.loads(options.json())
 
 @router.post("/webauthn/register/verify")
-def webauthn_register_verify(req_data: dict, request: Request, db: Session = Depends(get_db)):
-    user_id = "uuid-do-banco" # Substituir pela extração real via JWT
-    expected_challenge = challenge_cache.get(user_id)
+def webauthn_register_verify(req_data: dict, current_user_id: str = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    expected_challenge = challenge_cache.get(current_user_id)
     
     if not expected_challenge:
         raise HTTPException(status_code=400, detail="Challenge expirado")
@@ -332,14 +332,14 @@ def webauthn_register_verify(req_data: dict, request: Request, db: Session = Dep
         
         db.add(WebAuthnPasskey(
             id=str(uuid.uuid4()),
-            user_id=user_id, 
+            user_id=current_user_id, 
             credential_id=verification.credential_id.hex(), 
             public_key=verification.credential_public_key.hex(), 
             sign_count=verification.sign_count
         ))
         db.commit()
         
-        del challenge_cache[user_id] 
+        del challenge_cache[current_user_id] 
         return {"message": "Biometria registrada com sucesso!"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Falha no registro: {str(e)}")
@@ -462,3 +462,73 @@ def logout_endpoint(request: Request, response: Response, db: Session = Depends(
     db.commit()
     response.delete_cookie("refresh_token")
     return {"message": "Logout seguro concluído"}
+
+# ==========================================
+# 7. GERENCIAMENTO DE SESSÕES ATIVAS (REQ-57)
+# ==========================================
+
+@router.get("/sessions")
+def list_active_sessions(current_user_id: str = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """
+    Lista todas as sessões ativas do usuário autenticado.
+    REQ-57: Permite visualizar o histórico de sessões ativas e gerenciá-las.
+    """
+    sessions = db.query(RefreshSession).filter(
+        RefreshSession.user_id == current_user_id,
+        RefreshSession.is_revoked == False,
+        RefreshSession.expires_at > datetime.utcnow()
+    ).all()
+    
+    return {
+        "sessions": [
+            {
+                "id": session.id,
+                "ip_address": session.ip_address,
+                "user_agent": session.user_agent,
+                "created_at": session.id[:8],  # Aproximadamente quando foi criada (baseado no UUID v7)
+                "expires_at": session.expires_at.isoformat() if session.expires_at else None,
+                "is_active": True
+            }
+            for session in sessions
+        ]
+    }
+
+@router.post("/sessions/{session_id}/revoke")
+def revoke_session(session_id: str, current_user_id: str = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """
+    Revoga uma sessão específica do usuário.
+    REQ-57: Permite encerrar sessões individuais em outros dispositivos.
+    """
+    session = db.query(RefreshSession).filter(
+        RefreshSession.id == session_id,
+        RefreshSession.user_id == current_user_id
+    ).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Sessão não encontrada")
+    
+    session.is_revoked = True
+    db.add(AuditLog(user_id=current_user_id, action="SESSION_REVOKED", ip_address=session.ip_address))
+    db.commit()
+    
+    return {"message": "Sessão encerrada com sucesso"}
+
+@router.post("/sessions/revoke-all", dependencies=[Depends(validar_csrf)])
+def revoke_all_sessions(request: Request, current_user_id: str = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """
+    Revoga todas as sessões do usuário EXCETO a atual.
+    REQ-57: Permite sair de todos os dispositivos com um clique.
+    """
+    current_token = request.cookies.get("refresh_token")
+    
+    # Revoga todas as sessões exceto a atual
+    db.query(RefreshSession).filter(
+        RefreshSession.user_id == current_user_id,
+        RefreshSession.id != current_token,
+        RefreshSession.is_revoked == False
+    ).update({"is_revoked": True})
+    
+    db.add(AuditLog(user_id=current_user_id, action="ALL_SESSIONS_REVOKED", ip_address=request.client.host))
+    db.commit()
+    
+    return {"message": "Todas as outras sessões foram encerradas"}
