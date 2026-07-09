@@ -26,6 +26,7 @@ async def sign_pdf_endpoint(
     file: UploadFile = File(...),
     coord_x: int = Form(100),
     coord_y: int = Form(100),
+    page: int = Form(1), # NOVO: Puxa o número da página do formulário
     db: Session = Depends(get_db),
     current_user_id: str = Depends(get_current_active_user),
 ):
@@ -40,24 +41,31 @@ async def sign_pdf_endpoint(
     # 2. Desencripta a chave privada na RAM (REQ-45)
     priv_pem = sec.decrypt_private_key(user.rsa_priv_encrypted)
     
-    # 3. Executa a assinatura real (REQ-46 e REQ-47)
+    # 3. NOVO: Geramos o ID da Assinatura antes de assinar, para o podermos injetar no selo visual!
+    sig_id = str(uuid.uuid4())
+    
+    # 4. Executa a assinatura real (REQ-46 e REQ-47)
     signed_bytes, signed_hash = pdf_sec.sign_document(
         pdf_bytes=pdf_bytes, 
         priv_pem=priv_pem, 
-        cert_pem=user.rsa_pub, # Usamos o campo rsa_pub para guardar o certificado X509
+        cert_pem=user.rsa_pub,
         user_name=user.username,
-        coords=(coord_x, coord_y)
+        coords=(coord_x, coord_y),
+        page=page,             # Passa a página pedida
+        doc_hash=orig_hash,    # Passa o hash original
+        sig_id=sig_id          # Passa o UUID gerado
     )
 
-    # 4. Defesa: REQ-48 e REQ-49. Registo de Auditoria
+    # 5. Defesa: REQ-48 e REQ-49. Registo de Auditoria
     signature_record = DocumentSignature(
-        id=str(uuid.uuid4()),
+        id=sig_id, # Usamos o ID que injetámos no selo
         user_id=user.id,
         doc_hash_orig=orig_hash,
         doc_hash_signed=signed_hash,
         timestamp=datetime.utcnow(),
         ip_address=request.client.host,
-        coord_x=coord_x, coord_y=coord_y, page=1
+        coord_x=coord_x, coord_y=coord_y, 
+        page=page # NOVO: Regista a página real na base de dados (e não apenas um "1" fixo)
     )
     db.add(signature_record)
     db.commit()

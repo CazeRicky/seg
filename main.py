@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from routers.auth import limiter # Importa o limitador do auth.py
+from fastapi.exceptions import RequestValidationError
 
 # 1. Carrega as variáveis do .env ANTES de qualquer outra coisa
 load_dotenv()
@@ -89,6 +90,26 @@ async def security_headers(request: Request, call_next):
     return response
 
 # ---------- PADRONIZAÇÃO DE ERROS ----------
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Defesa: RNF-14 - Padroniza os erros gerados pelas validações do Pydantic.
+    Evita a fuga do formato nativo do FastAPI (422) e mantém a consistência da API.
+    """
+    # Apanha o motivo do primeiro erro de validação para dar um feedback útil
+    erros = exc.errors()
+    mensagem_detalhe = erros[0].get("msg") if erros else "Dados fornecidos são inválidos."
+    
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST, # Usamos 400 ou 422 consoante preferires
+        content={
+            "code": "SYS_002",
+            "message": f"Falha na validação: {mensagem_detalhe}",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
@@ -99,6 +120,7 @@ async def global_exception_handler(request: Request, exc: Exception):
             "timestamp": datetime.utcnow().isoformat()
         }
     )
+
 # Registra o Rate Limiter na aplicação
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

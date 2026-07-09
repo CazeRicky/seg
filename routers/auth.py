@@ -99,6 +99,19 @@ class RegisterRequest(BaseModel):
             raise ValueError("A senha não atende aos requisitos mínimos de complexidade.")
         return v
 
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+    @field_validator('new_password')
+    @classmethod
+    def validate_password_complexity(cls, v):
+        # Defesa: REQ-01. Mínimo 12 chars, 1 maiúscula, 1 minúscula, 1 número, 1 símbolo
+        pattern = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{12,}$"
+        if not re.match(pattern, v):
+            raise ValueError("A nova senha não atende aos requisitos mínimos de complexidade.")
+        return v
+
 class TotpEnableRequest(BaseModel):
     totp_code: str
 
@@ -403,6 +416,63 @@ def webauthn_auth_verify(req_data: dict, request: Request, response: Response, d
         
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Falha na autenticação: {str(e)}")
+    
+    # ==========================================
+# GESTÃO DE DISPOSITIVOS WEBAUTHN (REQ-10)
+# ==========================================
+
+@router.get("/webauthn/devices")
+def list_webauthn_devices(current_user_id: str = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """
+    REQ-10: Permite que o utilizador liste os seus dispositivos biométricos cadastrados.
+    """
+    devices = db.query(WebAuthnPasskey).filter(WebAuthnPasskey.user_id == current_user_id).all()
+    
+    return {
+        "devices": [
+            {
+                "id": device.id,
+                # Retorna apenas um prefixo da credencial por segurança, útil para UI
+                "credential_id_prefix": device.credential_id[:16] + "...", 
+                "sign_count": device.sign_count
+            }
+            for device in devices
+        ]
+    }
+
+@router.delete("/webauthn/devices/{device_id}", dependencies=[Depends(validar_csrf)])
+def revoke_webauthn_device(
+    device_id: str, 
+    request: Request,
+    current_user_id: str = Depends(get_current_active_user), 
+    db: Session = Depends(get_db)
+):
+    """
+    REQ-10: Permite que o utilizador revogue/apague um dispositivo cadastrado.
+    """
+    # Procura o dispositivo garantindo que pertence ao utilizador atual
+    device = db.query(WebAuthnPasskey).filter(
+        WebAuthnPasskey.id == device_id,
+        WebAuthnPasskey.user_id == current_user_id
+    ).first()
+    
+    if not device:
+        raise HTTPException(status_code=404, detail="Dispositivo não encontrado ou não tem permissão para o remover.")
+        
+    db.delete(device)
+    
+    # REQ-55/56: Registo da ação na auditoria
+    db.add(AuditLog(
+        user_id=current_user_id, 
+        action="WEBAUTHN_DEVICE_REVOKED", 
+        ip_address=request.client.host,
+        user_agent=request.headers.get("user-agent", ""),
+        details=json.dumps({"device_id": device_id})
+    ))
+    
+    db.commit()
+    
+    return {"message": "Dispositivo removido com sucesso."}
 
 # ==========================================
 # 5. ROTA DE REFRESH COM ROTAÇÃO (REQ-29/30)
@@ -532,3 +602,64 @@ def revoke_all_sessions(request: Request, current_user_id: str = Depends(get_cur
     db.commit()
     
     return {"message": "Todas as outras sessões foram encerradas"}
+
+# ==========================================
+# 8. GESTÃO DE CONTA - TROCA DE SENHA (REQ-58)
+# ==========================================
+
+@router.post("/change-password", dependencies=[Depends(validar_csrf)])
+def change_password_endpoint(
+    req: ChangePasswordRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user_id: str = Depends(get_current_active_user)
+):
+    """
+    REQ-58: Permite ao utilizador alterar a sua senha com verificação da senha antiga,
+    revalidação de complexidade, revogação global de sessões e alerta por e-mail.
+    """
+    user = db.query(User).filter(User.id == current_user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilizador não encontrado")
+
+    # 1. Valida se a senha atual está correta antes de permitir qualquer modificação
+    if not sec.verify_password(req.old_password, user.password_hash):
+        db.add(AuditLog(
+            user_id=user.id, 
+            action="PASSWORD_CHANGE_FAILED", 
+            ip_address=request.client.host,
+            user_agent=request.headers.get("user-agent", ""),
+            details=json.dumps({"reason": "Senha atual incorreta"})
+        ))
+        db.commit()
+        raise HTTPException(status_code=400, detail="A senha atual inserida está incorreta.")
+
+    # 2. Impede que a nova senha seja igual à senha antiga
+    if req.old_password == req.new_password:
+        raise HTTPException(status_code=400, detail="A nova senha não pode ser idêntica à senha atual.")
+
+    # 3. Atualiza o hash na base de dados utilizando Argon2id (configuração OWASP)
+    user.password_hash = sec.hash_password(req.new_password)
+    
+    # 4. Defesa de Alta Segurança: Revoga todas as sessões ativas (obriga a novo login em todos os dispositivos)
+    db.query(RefreshSession).filter(RefreshSession.user_id == current_user_id).update({"is_revoked": True})
+    
+    # 5. REQ-55/56: Registo do sucesso na auditoria
+    db.add(AuditLog(
+        user_id=current_user_id,
+        action="PASSWORD_CHANGED",
+        ip_address=request.client.host,
+        user_agent=request.headers.get("user-agent", ""),
+        details=json.dumps({"status": "success"})
+    ))
+    db.commit()
+
+    # 6. Notificação imediata por e-mail
+    if user.email:
+        enviar_email_notificacao(
+            user.email,
+            "Segurança SecureSign: Senha alterada",
+            f"A senha da sua conta foi alterada com sucesso em {datetime.utcnow().isoformat()} UTC a partir do IP {request.client.host}.\n\nSe não realizou esta operação, por favor contacte imediatamente o administrador do sistema."
+        )
+
+    return {"message": "Senha alterada com sucesso. Todas as sessões ativas foram encerradas por motivos de segurança."}

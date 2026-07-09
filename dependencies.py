@@ -1,5 +1,6 @@
 from fastapi import Depends, HTTPException, Request, status
 import jwt
+import hashlib 
 from sqlalchemy.orm import Session
 from models import DenylistToken
 from database import get_db
@@ -12,7 +13,6 @@ def validar_csrf(request: Request):
     origem = request.headers.get("origin")
     referer = request.headers.get("referer")
     
-    # Adicione aqui os domínios permitidos (devem coincidir com o CORS do main.py)
     origens_permitidas = [
         "https://front-oficial.com",
         "http://localhost:3000",
@@ -49,7 +49,8 @@ def validar_csrf(request: Request):
 
 def get_current_active_user(request: Request, db: Session = Depends(get_db)):
     """
-    Defesa: REQ-22 - Verificador Global de Sessões (Denylist + Validação JWT)
+    Defesa: REQ-22, REQ-26 e REQ-27 - Verificador Global de Sessões
+    Inclui validação de Denylist e Fingerprint de Rede/Dispositivo.
     """
     auth_header = request.headers.get("Authorization")
     
@@ -68,7 +69,21 @@ def get_current_active_user(request: Request, db: Session = Depends(get_db)):
         if db.query(DenylistToken).filter(DenylistToken.jti == jti).first():
             raise HTTPException(status_code=401, detail="Token revogado (Logout realizado)")
             
-        return user_id # Retorna o ID do utilizador autenticado
+        # 3. Defesa REQ-26 e REQ-27: Fingerprint Check (Anti-Roubo de Token)
+        current_ip = request.client.host
+        current_ua = request.headers.get("user-agent", "")
+        
+        current_ip_hash = hashlib.sha256(current_ip.encode('utf-8')).hexdigest()
+        current_ua_hash = hashlib.sha256(current_ua.encode('utf-8')).hexdigest()
+        
+        # Se o token foi roubado e está a ser usado noutra rede ou navegador, a requisição é bloqueada
+        if payload.get("ip_hash") != current_ip_hash:
+            raise HTTPException(status_code=401, detail="Token inválido: Alteração de rede (IP) detetada.")
+            
+        if payload.get("ua_hash") != current_ua_hash:
+            raise HTTPException(status_code=401, detail="Token inválido: Alteração de dispositivo/navegador detetada.")
+            
+        return user_id 
         
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expirado")
