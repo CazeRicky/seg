@@ -8,6 +8,7 @@ import uuid
 import re
 import jwt
 import json
+import hashlib
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Response, HTTPException, status, Depends
@@ -119,7 +120,7 @@ def generate_csrf_token() -> str:
     return secrets.token_urlsafe(32)
 
 # ==========================================
-# 1. LOGIN BLINDADO (REQ-03, REQ-04, REQ-05, REQ-15)
+# 1. LOGIN BLINDADO
 # ==========================================
 @router.post("/login")
 @limiter.limit("10/minute")
@@ -136,6 +137,13 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
         user.failed_login_attempts += 1
         if user.failed_login_attempts >= 5:
             user.locked_until = datetime.utcnow() + timedelta(minutes=15)
+            # FIX REQ-03: Notificação por e-mail no bloqueio
+            if user.email:
+                enviar_email_notificacao(
+                    user.email,
+                    "Segurança: Conta Bloqueada",
+                    f"A sua conta foi bloqueada por 15 minutos devido a múltiplas tentativas de login falhas a partir do IP {request.client.host}."
+                )
         
         db.add(AuditLog(user_id=user.id, action="LOGIN_FAILED", ip_address=request.client.host))
         db.commit()
@@ -144,25 +152,42 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
     user.failed_login_attempts = 0
     db.commit()
 
-    if user.email:
+    # FIX REQ-58: E-mail APENAS para novos logins de IPs desconhecidos
+    ip_conhecido = db.query(RefreshSession).filter(
+        RefreshSession.user_id == user.id,
+        RefreshSession.ip_address == request.client.host
+    ).first()
+
+    if not ip_conhecido and user.email:
         enviar_email_notificacao(
             user.email,
-            "Novo login detectado",
-            f"Um novo login foi realizado para sua conta em {datetime.utcnow().isoformat()} de {request.client.host}."
+            "Novo login de IP desconhecido",
+            f"Um novo acesso foi realizado na sua conta a partir de um IP não reconhecido: {request.client.host}."
         )
 
     if user.is_totp_enabled:
         if not req.totp_code or not sec.verify_totp(user.totp_secret, req.totp_code):
             db.add(AuditLog(user_id=user.id, action="LOGIN_FAILED_2FA", ip_address=request.client.host))
             db.commit()
+            # FIX REQ-16: Alerta ativo sobre falha no TOTP
+            if user.email:
+                enviar_email_notificacao(
+                    user.email,
+                    "Alerta de Segurança: Falha no 2FA",
+                    f"Registramos uma tentativa de login com falha no código de dois fatores (TOTP) a partir do IP {request.client.host}."
+                )
             raise HTTPException(status_code=401, detail={"code": "AUTH_003", "message": "Código 2FA inválido"})
 
     session_id = str(uuid.uuid4())
     access_jwt, jti = sec.generate_access_token(user.id, request.client.host, request.headers.get("user-agent", ""), session_id)
+    
     refresh_token = sec.generate_refresh_token()
+    # FIX REQ-19: Armazenar o Refresh Token apenas como HASH
+    refresh_token_hash = hashlib.sha256(refresh_token.encode('utf-8')).hexdigest()
     
     db.add(RefreshSession(
-        id=refresh_token, user_id=user.id, 
+        id=refresh_token_hash, # Guarda APENAS o Hash na BD
+        user_id=user.id, 
         expires_at=datetime.utcnow() + timedelta(days=7),
         ip_address=request.client.host, user_agent=request.headers.get("user-agent", "")
     ))
@@ -171,34 +196,23 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
     use_secure_cookie = os.getenv("ENVIRONMENT", "development").lower() == "production"
     csrf_token = generate_csrf_token()
 
+    # FIX REQ-20: Cookie HttpOnly forçado para samesite="strict"
     response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        secure=use_secure_cookie,
-        samesite="Lax",
-        max_age=604800,
+        key="refresh_token", value=refresh_token, httponly=True, secure=use_secure_cookie,
+        samesite="strict", max_age=604800,
     )
     response.set_cookie(
-        key="csrf_token",
-        value=csrf_token,
-        httponly=False,
-        secure=use_secure_cookie,
-        samesite="Lax",
-        max_age=604800,
+        key="csrf_token", value=csrf_token, httponly=False, secure=use_secure_cookie,
+        samesite="strict", max_age=604800,
     )
 
     return {
         "access_token": access_jwt,
         "csrf_token": csrf_token,
         "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "is_totp_enabled": user.is_totp_enabled,
+            "id": user.id, "username": user.username, "email": user.email, "is_totp_enabled": user.is_totp_enabled
         }
     }
-
 # ==========================================
 # 2. REGISTRO DE USUÁRIO
 # ==========================================
@@ -482,7 +496,9 @@ def refresh_token_endpoint(request: Request, response: Response, db: Session = D
     old_refresh = request.cookies.get("refresh_token")
     if not old_refresh: raise HTTPException(status_code=401, detail="Refresh token ausente")
     
-    session_db = db.query(RefreshSession).filter(RefreshSession.id == old_refresh).first()
+    # REQ-19: Hashear antes de procurar
+    old_refresh_hash = hashlib.sha256(old_refresh.encode('utf-8')).hexdigest()
+    session_db = db.query(RefreshSession).filter(RefreshSession.id == old_refresh_hash).first()
     
     if not session_db or session_db.is_revoked:
         if session_db:
@@ -492,25 +508,22 @@ def refresh_token_endpoint(request: Request, response: Response, db: Session = D
 
     session_db.is_revoked = True
     new_refresh = sec.generate_refresh_token()
+    new_refresh_hash = hashlib.sha256(new_refresh.encode('utf-8')).hexdigest()
     
-    db.add(RefreshSession(id=new_refresh, user_id=session_db.user_id, expires_at=datetime.utcnow() + timedelta(days=7)))
+    db.add(RefreshSession(
+        id=new_refresh_hash, user_id=session_db.user_id, 
+        expires_at=datetime.utcnow() + timedelta(days=7),
+        ip_address=request.client.host, user_agent=request.headers.get("user-agent", "")
+    ))
     db.commit()
     
-    new_access, _ = sec.generate_access_token(session_db.user_id, request.client.host, "", "new_session_id")
+    new_access, _ = sec.generate_access_token(session_db.user_id, request.client.host, request.headers.get("user-agent", ""), "new_session_id")
     csrf_token = generate_csrf_token()
+    
     response.set_cookie(key="refresh_token", value=new_refresh, httponly=True, secure=True, samesite="strict", max_age=604800)
     response.set_cookie(key="csrf_token", value=csrf_token, httponly=False, secure=True, samesite="strict", max_age=604800)
     user = db.query(User).filter(User.id == session_db.user_id).first()
-    return {
-        "access_token": new_access,
-        "csrf_token": csrf_token,
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "is_totp_enabled": user.is_totp_enabled,
-        },
-    }
+    return {"access_token": new_access, "csrf_token": csrf_token, "user": {"id": user.id, "username": user.username, "email": user.email, "is_totp_enabled": user.is_totp_enabled}}
 
 # ==========================================
 # 6. LOGOUT E DENYLIST (REQ-21/23)
@@ -522,12 +535,13 @@ def logout_endpoint(request: Request, response: Response, db: Session = Depends(
     if auth_header:
         token = auth_header.split(" ")[1]
         payload = jwt.decode(token, sec.jwt_pub_pem, algorithms=["RS256"])
-        
         db.add(DenylistToken(jti=payload["jti"], expires_at=datetime.utcfromtimestamp(payload["exp"])))
         
     old_refresh = request.cookies.get("refresh_token")
     if old_refresh:
-        db.query(RefreshSession).filter(RefreshSession.id == old_refresh).update({"is_revoked": True})
+        # REQ-19: Revogar com base no Hash!
+        old_refresh_hash = hashlib.sha256(old_refresh.encode('utf-8')).hexdigest()
+        db.query(RefreshSession).filter(RefreshSession.id == old_refresh_hash).update({"is_revoked": True})
         
     db.commit()
     response.delete_cookie("refresh_token")
@@ -585,22 +599,16 @@ def revoke_session(session_id: str, current_user_id: str = Depends(get_current_a
 
 @router.post("/sessions/revoke-all", dependencies=[Depends(validar_csrf)])
 def revoke_all_sessions(request: Request, current_user_id: str = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    """
-    Revoga todas as sessões do usuário EXCETO a atual.
-    REQ-57: Permite sair de todos os dispositivos com um clique.
-    """
     current_token = request.cookies.get("refresh_token")
+    query = db.query(RefreshSession).filter(RefreshSession.user_id == current_user_id, RefreshSession.is_revoked == False)
     
-    # Revoga todas as sessões exceto a atual
-    db.query(RefreshSession).filter(
-        RefreshSession.user_id == current_user_id,
-        RefreshSession.id != current_token,
-        RefreshSession.is_revoked == False
-    ).update({"is_revoked": True})
-    
+    if current_token:
+        current_token_hash = hashlib.sha256(current_token.encode('utf-8')).hexdigest()
+        query = query.filter(RefreshSession.id != current_token_hash)
+        
+    query.update({"is_revoked": True})
     db.add(AuditLog(user_id=current_user_id, action="ALL_SESSIONS_REVOKED", ip_address=request.client.host))
     db.commit()
-    
     return {"message": "Todas as outras sessões foram encerradas"}
 
 # ==========================================
