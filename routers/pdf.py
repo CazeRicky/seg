@@ -84,21 +84,33 @@ async def sign_pdf_endpoint(
 @limiter.limit("5/minute")
 async def verify_pdf_endpoint(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
-    Defesa: REQ-54 - O PDF é processado em memória e nunca é guardado no disco.
+    Defesa: REQ-50 e REQ-54 - Validação Matemática e Isolada do Arquivo Físico.
     """
     pdf_bytes, current_hash = await pdf_sec.validate_and_hash(file)
 
-    # Defesa: REQ-51. Compara o hash atual com a base de dados
+    # 1. FIX REQ-50: Envia o PDF para o Sandbox validar matematicamente as chaves X.509
+    verification_result = pdf_sec.verify_document(pdf_bytes)
+
+    if not verification_result.get("valid"):
+        raise HTTPException(status_code=400, detail={"code": "DOC_004", "message": "O documento possui uma assinatura corrompida ou foi adulterado após a assinatura."})
+
+    # 2. Defesa em Profundidade: Cruzamos a validação estrutural com os nossos registos (Opcional, mas altíssimo nível de segurança)
     sig_record = db.query(DocumentSignature).filter(DocumentSignature.doc_hash_signed == current_hash).first()
     
     if sig_record:
-        # Defesa: REQ-52
         return {
             "status": "VALID",
-            "message": "Documento íntegro e assinatura autêntica.",
+            "message": "Documento íntegro e assinatura criptográfica matemática (X.509) autêntica.",
+            "signer": verification_result.get("signer", "Desconhecido"),
             "signed_at": sig_record.timestamp.isoformat(),
-            "original_hash": sig_record.doc_hash_orig
+            "original_hash": sig_record.doc_hash_orig,
+            "database_verified": True
         }
     else:
-        # Se o hash não estiver na base de dados, significa que foi adulterado ou nunca foi assinado aqui
-        raise HTTPException(status_code=400, detail={"code": "DOC_004", "message": "Documento adulterado ou assinatura não encontrada."})
+        # Se o ficheiro é válido matematicamente mas não está na nossa base (ex: assinado noutra plataforma)
+        return {
+            "status": "PARTIAL_VALID",
+            "message": "A assinatura estrutural é válida, mas não existe registo de auditoria deste documento na nossa base de dados.",
+            "signer": verification_result.get("signer", "Desconhecido"),
+            "database_verified": False
+        }

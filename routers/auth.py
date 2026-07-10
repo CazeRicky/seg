@@ -166,7 +166,9 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
         )
 
     if user.is_totp_enabled:
-        if not req.totp_code or not sec.verify_totp(user.totp_secret, req.totp_code):
+        # FIX REQ-12: Desencriptar antes do login
+        decrypted_secret = sec.decrypt_data(user.totp_secret)
+        if not req.totp_code or not sec.verify_totp(decrypted_secret, req.totp_code):
             db.add(AuditLog(user_id=user.id, action="LOGIN_FAILED_2FA", ip_address=request.client.host))
             db.commit()
             # FIX REQ-16: Alerta ativo sobre falha no TOTP
@@ -274,7 +276,7 @@ def setup_totp(request: Request, db: Session = Depends(get_db), current_user_id:
 
     backup_codes = [secrets.token_hex(4) for _ in range(8)]
     backup_codes_hashes = [sec.hash_password(code) for code in backup_codes]
-
+    user.totp_secret = sec.encrypt_data(totp_secret)
     user.totp_secret = totp_secret
     user.backup_codes = json.dumps(backup_codes_hashes)
     db.commit()
@@ -302,6 +304,10 @@ def setup_totp(request: Request, db: Session = Depends(get_db), current_user_id:
 @router.post("/totp/enable")
 def enable_totp(req: TotpEnableRequest, request: Request, db: Session = Depends(get_db), current_user_id: str = Depends(get_current_active_user)):
     user = db.query(User).filter(User.id == current_user_id).first()
+    decrypted_secret = sec.decrypt_data(user.totp_secret)
+    if not sec.verify_totp(decrypted_secret, req.totp_code):
+        raise HTTPException(status_code=401, detail="Código TOTP inválido")
+    
     if not user or not user.totp_secret:
         raise HTTPException(status_code=400, detail="Configuração TOTP não encontrada")
 
@@ -362,7 +368,8 @@ def webauthn_register_verify(req_data: dict, current_user_id: str = Depends(get_
             user_id=current_user_id, 
             credential_id=verification.credential_id.hex(), 
             public_key=verification.credential_public_key.hex(), 
-            sign_count=verification.sign_count
+            sign_count=verification.sign_count,
+            aaguid=str(verification.aaguid) # FIX REQ-07: Extraído da resposta criptográfica
         ))
         db.commit()
         

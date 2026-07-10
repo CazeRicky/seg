@@ -129,6 +129,17 @@ class SecurityEngine:
     def generate_refresh_token(self) -> str:
         # Defesa: REQ-19. Gera um UUID opaco v7 (ordenável) para a sessão longa
         return str(uuid7())
+    def encrypt_data(self, data: str) -> str:
+        # Usado para encriptar o TOTP Secret (REQ-12)
+        master_key = os.getenv("MASTER_KEY")
+        f = Fernet(master_key.encode('utf-8'))
+        return f.encrypt(data.encode('utf-8')).decode('utf-8')
+
+    def decrypt_data(self, encrypted_data: str) -> str:
+        # Usado para desencriptar o TOTP Secret (REQ-12)
+        master_key = os.getenv("MASTER_KEY")
+        f = Fernet(master_key.encode('utf-8'))
+        return f.decrypt(encrypted_data.encode('utf-8')).decode('utf-8')
 
 # Instância singleton que mantém as mesmas chaves RSA durante a execução do processo
 sec = SecurityEngine()

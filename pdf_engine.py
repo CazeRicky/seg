@@ -73,3 +73,28 @@ class PDFSecurityEngine:
             raise HTTPException(status_code=408, detail={"code": "DOC_007", "message": "Timeout ao processar PDF (possível bomba de descompressão ou ficheiro demasiado pesado)."})
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": "DOC_008", "message": "Erro na ponte de comunicação de assinatura."})
+    def verify_document(self, pdf_bytes: bytes) -> dict:
+        """
+        Defesa: REQ-50 - Consulta estrutural (criptográfica) de assinaturas X.509 em Sandbox
+        """
+        payload = {
+            "action": "verify",
+            "pdf_base64": base64.b64encode(pdf_bytes).decode('utf-8')
+        }
+        worker_path = os.path.join(os.path.dirname(__file__), "pdf_worker.py")
+        
+        try:
+            process = subprocess.Popen(["python", worker_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout, stderr = process.communicate(input=json.dumps(payload), timeout=10)
+            
+            if process.returncode != 0:
+                raise HTTPException(status_code=500, detail={"code": "DOC_005", "message": "Falha crítica no isolamento do PDF."})
+                
+            result = json.loads(stdout)
+            if result.get("status") == "error":
+                raise HTTPException(status_code=400, detail={"code": "DOC_004", "message": result.get("message")})
+                
+            return result
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise HTTPException(status_code=408, detail={"code": "DOC_007", "message": "Timeout ao processar PDF."})

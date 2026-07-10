@@ -23,12 +23,12 @@ class User(Base):
 
 class WebAuthnPasskey(Base):
     __tablename__ = "webauthn_passkeys"
-    #defesa:REQ-07.tabela especifica p guardar as biometrias/passkeys do FIDO2
     id = Column(String, primary_key=True)
     user_id = Column(String, ForeignKey("users.id"))
     credential_id = Column(String, unique=True, index=True)
     public_key = Column(String)
-    sign_count = Column(Integer, default=0) #defesa:REQ-08.evita clonagem de dispositivo
+    sign_count = Column(Integer, default=0)
+    aaguid = Column(String) # FIX REQ-07: Identificador do modelo do hardware
 
 class RefreshSession(Base):
     __tablename__ = "refresh_sessions"
