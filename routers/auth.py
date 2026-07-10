@@ -166,19 +166,40 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
         )
 
     if user.is_totp_enabled:
-        # FIX REQ-12: Desencriptar antes do login
+        if not req.totp_code:
+            raise HTTPException(status_code=401, detail={"code": "AUTH_003", "message": "Código 2FA ausente"})
+            
         decrypted_secret = sec.decrypt_data(user.totp_secret)
-        if not req.totp_code or not sec.verify_totp(decrypted_secret, req.totp_code):
+        
+        # 1. Tenta validar via Autenticador (TOTP Normal)
+        is_totp_valid = sec.verify_totp(decrypted_secret, req.totp_code)
+        is_backup_valid = False
+        
+        # 2. Se o TOTP falhar, tenta validar via Código de Backup (REQ-14)
+        if not is_totp_valid and user.backup_codes:
+            backup_codes_hashes = json.loads(user.backup_codes)
+            for i, code_hash in enumerate(backup_codes_hashes):
+                if sec.verify_password(req.totp_code, code_hash):
+                    is_backup_valid = True
+                    # Remove o código usado da lista (é de uso único)
+                    backup_codes_hashes.pop(i)
+                    user.backup_codes = json.dumps(backup_codes_hashes)
+                    
+                    db.add(AuditLog(user_id=user.id, action="BACKUP_CODE_USED", ip_address=request.client.host))
+                    db.commit()
+                    break # Código encontrado, para de procurar
+
+        # 3. Se ambos falharem, bloqueia e avisa
+        if not is_totp_valid and not is_backup_valid:
             db.add(AuditLog(user_id=user.id, action="LOGIN_FAILED_2FA", ip_address=request.client.host))
             db.commit()
-            # FIX REQ-16: Alerta ativo sobre falha no TOTP
             if user.email:
                 enviar_email_notificacao(
                     user.email,
                     "Alerta de Segurança: Falha no 2FA",
-                    f"Registramos uma tentativa de login com falha no código de dois fatores (TOTP) a partir do IP {request.client.host}."
+                    f"Registramos uma tentativa de login com falha no código de dois fatores (TOTP/Backup) a partir do IP {request.client.host}."
                 )
-            raise HTTPException(status_code=401, detail={"code": "AUTH_003", "message": "Código 2FA inválido"})
+            raise HTTPException(status_code=401, detail={"code": "AUTH_003", "message": "Código 2FA ou de recuperação inválido"})
 
     session_id = str(uuid.uuid4())
     access_jwt, jti = sec.generate_access_token(user.id, request.client.host, request.headers.get("user-agent", ""), session_id)

@@ -10,9 +10,25 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from routers.auth import limiter # Importa o limitador do auth.py
 from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
 
 # 1. Carrega as variáveis do .env ANTES de qualquer outra coisa
 load_dotenv()
+
+# FIX REQ-08: Trava de segurança total. Impede o arranque se faltar ALGO crítico.
+critical_vars = [
+    "DB_CONNECTION_STRING", 
+    "MASTER_KEY",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USER",
+    "SMTP_PASSWORD",
+    "SMTP_FROM"
+]
+missing_vars = [var for var in critical_vars if not os.getenv(var)]
+if missing_vars:
+    raise RuntimeError(f"ERRO CRÍTICO: Variáveis de ambiente obrigatórias ausentes no .env: {', '.join(missing_vars)}")
 
 # 2. Trava de segurança: impede o sistema de ligar se não achar a senha do banco
 if not os.getenv("DB_CONNECTION_STRING"):
@@ -93,8 +109,6 @@ async def security_headers(request: Request, call_next):
 
 # ---------- PADRONIZAÇÃO DE ERROS ----------
 
-# ---------- PADRONIZAÇÃO DE ERROS ----------
-
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
@@ -113,6 +127,24 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             "timestamp": datetime.utcnow().isoformat()
         }
     )
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """
+    Defesa: RNF-12 - Formatação padronizada para erros levantados manualmente via HTTPException.
+    Remove a obrigatoriedade da chave "detail" e garante que o timestamp está sempre presente na raiz.
+    """
+    content = {"timestamp": datetime.utcnow().isoformat()}
+    
+    # Se passámos um dicionário (ex: detail={"code": "...", "message": "..."}), espalha as chaves na raiz
+    if isinstance(exc.detail, dict):
+        content.update(exc.detail)
+    else:
+        # Se foi passado apenas texto, cria a estrutura
+        content["code"] = "SYS_000"
+        content["message"] = str(exc.detail)
+        
+    return JSONResponse(status_code=exc.status_code, content=content)
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
