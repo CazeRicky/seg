@@ -12,6 +12,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api
 
 export default function MainDashboard() {
   const canvasRef = useRef(null);
+  const signatureSectionRef = useRef(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [twoFactorRequired, setTwoFactorRequired] = useState(false);
@@ -29,7 +30,7 @@ export default function MainDashboard() {
   const [uploadedFile, setUploadedFile] = useState(null);
   const [signatureCount, setSignatureCount] = useState(12);
   const [activity, setActivity] = useState(initialActivity);
-  const [statusMessage, setStatusMessage] = useState("Pronto para validar sua próxima assinatura.");
+  const [statusMessage, setStatusMessage] = useState("Pronto para validar sua próxima assinatura digital.");
   const [authError, setAuthError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [isDrawing, setIsDrawing] = useState(false);
@@ -48,6 +49,13 @@ export default function MainDashboard() {
   const [allSessions, setAllSessions] = useState([]);
   const [showActiveSessions, setShowActiveSessions] = useState(false);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [passkeyDevices, setPasskeyDevices] = useState([]);
+  const [loadingPasskeys, setLoadingPasskeys] = useState(false);
+  const [passkeyMessage, setPasskeyMessage] = useState("");
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -122,7 +130,7 @@ export default function MainDashboard() {
     context.clearRect(0, 0, canvas.width, canvas.height);
     setSignaturePreview(null);
     setSignatureSaved(false);
-    setStatusMessage("�rea de assinatura limpa.");
+    setStatusMessage("Área de assinatura limpa.");
   };
 
   const saveSignature = () => {
@@ -179,6 +187,217 @@ export default function MainDashboard() {
     return body;
   };
 
+  const bufferToBase64Url = (value) => {
+    const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+    let binary = "";
+    bytes.forEach((byte) => {
+      binary += String.fromCharCode(byte);
+    });
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  };
+
+  const base64UrlToBuffer = (value) => {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = normalized.length % 4;
+    const padded = padding === 0 ? normalized : normalized + "=".repeat(4 - padding);
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  };
+
+  const buildPublicKeyOptions = (options) => ({
+    ...options,
+    challenge: base64UrlToBuffer(options.challenge),
+    user: options.user ? { ...options.user, id: base64UrlToBuffer(options.user.id) } : undefined,
+    allowCredentials: (options.allowCredentials || []).map((credential) => ({
+      ...credential,
+      id: base64UrlToBuffer(credential.id),
+    })),
+    excludeCredentials: (options.excludeCredentials || []).map((credential) => ({
+      ...credential,
+      id: base64UrlToBuffer(credential.id),
+    })),
+  });
+
+  const loadPasskeyDevices = async () => {
+    if (!accessToken) return;
+    try {
+      setLoadingPasskeys(true);
+      const response = await apiFetch("/auth/webauthn/devices", { method: "GET" });
+      setPasskeyDevices(response.devices || []);
+    } catch (error) {
+      setPasskeyMessage(error?.detail?.message || error?.message || "Falha ao carregar dispositivos passkey.");
+    } finally {
+      setLoadingPasskeys(false);
+    }
+  };
+
+  const registerPasskey = async () => {
+    if (!window.PublicKeyCredential || !navigator.credentials?.create) {
+      setPasskeyMessage("Seu navegador não suporta Passkeys/WebAuthn.");
+      return;
+    }
+
+    try {
+      setPasskeyMessage("");
+      const options = await apiFetch("/auth/webauthn/register/generate", { method: "POST" });
+      const credential = await navigator.credentials.create({
+        publicKey: buildPublicKeyOptions(options),
+      });
+
+      const response = credential.response;
+      const payload = {
+        id: credential.id,
+        rawId: bufferToBase64Url(credential.rawId),
+        type: credential.type,
+        response: {
+          clientDataJSON: bufferToBase64Url(response.clientDataJSON),
+          attestationObject: bufferToBase64Url(response.attestationObject),
+          transports: response.transports || [],
+        },
+        authenticatorAttachment: credential.authenticatorAttachment,
+        clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+      };
+
+      await apiFetch("/auth/webauthn/register/verify", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      setPasskeyMessage("Passkey registrada com sucesso.");
+      await loadPasskeyDevices();
+    } catch (error) {
+      setPasskeyMessage(error?.detail?.message || error?.message || "Falha ao registrar a Passkey.");
+    }
+  };
+
+  const loginWithPasskey = async () => {
+    if (!window.PublicKeyCredential || !navigator.credentials?.get) {
+      setAuthError("Seu navegador não suporta Passkeys/WebAuthn.");
+      return;
+    }
+
+    if (!email.trim()) {
+      setAuthError("Informe o e-mail ou nome de usuário para continuar com Passkey.");
+      return;
+    }
+
+    try {
+      setAuthError("");
+      setSuccessMessage("");
+      setIsLoading(true);
+      const options = await apiFetch("/auth/webauthn/authenticate/generate", {
+        method: "POST",
+        body: JSON.stringify({ username: email.trim().toLowerCase() }),
+      });
+      const credential = await navigator.credentials.get({
+        publicKey: buildPublicKeyOptions(options),
+      });
+
+      const response = credential.response;
+      const payload = {
+        id: credential.id,
+        rawId: bufferToBase64Url(credential.rawId),
+        type: credential.type,
+        response: {
+          clientDataJSON: bufferToBase64Url(response.clientDataJSON),
+          authenticatorData: bufferToBase64Url(response.authenticatorData),
+          signature: bufferToBase64Url(response.signature),
+          userHandle: response.userHandle ? bufferToBase64Url(response.userHandle) : null,
+        },
+        authenticatorAttachment: credential.authenticatorAttachment,
+        clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+      };
+
+      const data = await apiFetch("/auth/webauthn/authenticate/verify", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      setAccessToken(data.access_token);
+      setCsrfToken(data.csrf_token || "");
+      setCurrentUser(
+        data.user
+          ? {
+              id: data.user.id,
+              username: data.user.username,
+              email: data.user.email,
+              name: data.user.username,
+              is_totp_enabled: data.user.is_totp_enabled,
+            }
+          : {
+              username: email.trim().toLowerCase(),
+              email: email.trim().toLowerCase(),
+              name: email.trim().toLowerCase(),
+              is_totp_enabled: false,
+            }
+      );
+      setIsAuthenticated(true);
+      setTwoFactorRequired(false);
+      setTotpCode("");
+      setSuccessMessage("Login com Passkey concluído com sucesso.");
+      setStatusMessage(`Bem-vindo, ${email.trim().toLowerCase()}.`);
+      setActiveNav("Dashboard");
+      setTimeout(() => signatureSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 250);
+      await loadPasskeyDevices();
+    } catch (error) {
+      setAuthError(error?.detail?.message || error?.message || "Falha ao autenticar com Passkey.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const revokePasskeyDevice = async (deviceId) => {
+    try {
+      await apiFetch(`/auth/webauthn/devices/${deviceId}`, { method: "DELETE" });
+      setPasskeyDevices((current) => current.filter((device) => device.id !== deviceId));
+      setPasskeyMessage("Dispositivo removido com sucesso.");
+    } catch (error) {
+      setPasskeyMessage(error?.detail?.message || error?.message || "Falha ao remover o dispositivo.");
+    }
+  };
+
+  const handleChangePassword = async (event) => {
+    event.preventDefault();
+    setAuthError("");
+    setSuccessMessage("");
+
+    if (!oldPassword.trim() || !newPassword.trim() || !confirmNewPassword.trim()) {
+      setAuthError("Preencha a senha atual, a nova senha e a confirmação.");
+      return;
+    }
+
+    if (!passwordRegex.test(newPassword)) {
+      setAuthError("A nova senha deve ter pelo menos 12 caracteres, com maiúsculas, minúsculas, número e símbolo.");
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      setAuthError("A confirmação da nova senha não confere.");
+      return;
+    }
+
+    try {
+      await apiFetch("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({
+          old_password: oldPassword,
+          new_password: newPassword,
+        }),
+      });
+      setSuccessMessage("Senha alterada com sucesso. Todas as sessões foram encerradas por segurança.");
+      setOldPassword("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setShowChangePassword(false);
+    } catch (error) {
+      setAuthError(error?.detail?.message || error?.message || "Falha ao alterar a senha.");
+    }
+  };
+
   const refreshSession = async () => {
     if (refreshingSession) return;
     setRefreshingSession(true);
@@ -211,6 +430,7 @@ export default function MainDashboard() {
         });
         setIsAuthenticated(true);
         setStatusMessage(`Sessão restaurada. Bem-vindo de volta, ${body.user.username}.`);
+        await loadPasskeyDevices();
       }
 
       return body;
@@ -315,6 +535,10 @@ export default function MainDashboard() {
       setTotpCode("");
       setSuccessMessage("Login concluído com sucesso.");
       setStatusMessage(`Bem-vindo, ${email.trim().toLowerCase()}.`);
+      setActiveNav("Dashboard");
+      // scroll to signature area after login
+      setTimeout(() => signatureSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }), 250);
+      await loadPasskeyDevices();
     } catch (error) {
       const detail = error?.code || error?.detail?.code || error?.detail || error?.message || "Falha ao efetuar login.";
       if (detail === "AUTH_003" || (error?.detail && error.detail.message === "Código 2FA inválido")) {
@@ -597,15 +821,15 @@ export default function MainDashboard() {
               </div>
             </div>
             <h2 className="max-w-xl text-3xl font-semibold text-white sm:text-4xl">
-              Assine documentos com rastreabilidade, confian�a e auditoria completa.
+              Assine documentos com rastreabilidade, confiança e auditoria completa.
             </h2>
             <p className="mt-4 max-w-xl text-base text-slate-400">
-              Crie uma conta ou entre com suas credenciais para acessar a �rea protegida.
+              Crie uma conta ou entre com suas credenciais para acessar a área protegida.
             </p>
             <div className="mt-8 grid gap-3 sm:grid-cols-3">
               {[
                 { label: "Criptografia", value: "256-bit" },
-                { label: "Hash", value: "Audit�vel" },
+                { label: "Hash", value: "Auditável" },
                 { label: "Tempo", value: "< 2s" },
               ].map((item) => (
                 <div key={item.label} className="rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
@@ -691,7 +915,7 @@ export default function MainDashboard() {
 
               {twoFactorRequired && (
                 <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-300">C�digo TOTP</label>
+                  <label className="mb-2 block text-sm font-medium text-slate-300">Código TOTP</label>
                   <input
                     type="text"
                     value={totpCode}
@@ -705,6 +929,15 @@ export default function MainDashboard() {
 
               {authError && <p className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-300">{authError}</p>}
               {successMessage && <p className="rounded-xl border border-emerald-400/20 bg-emerald-500/10 p-3 text-sm text-emerald-200">{successMessage}</p>}
+
+              <button
+                type="button"
+                onClick={loginWithPasskey}
+                disabled={isLoading}
+                className="flex w-full items-center justify-center gap-2 rounded-2xl border border-blue-400/30 bg-blue-500/10 px-4 py-3 text-sm font-semibold text-blue-300 transition hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-80"
+              >
+                {isLoading ? "Aguarde..." : "Entrar com Passkey"}
+              </button>
 
               <button
                 type="submit"
@@ -726,6 +959,30 @@ export default function MainDashboard() {
                 )}
               </button>
             </form>
+
+            <div className="mt-6 rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
+              <p className="text-sm font-medium text-emerald-400">Verificação pública</p>
+              <p className="mt-2 text-sm text-slate-400">Envie um PDF para validar a assinatura sem precisar de login.</p>
+              <input
+                type="file"
+                accept="application/pdf"
+                onChange={(event) => setVerificationFile(event.target.files?.[0] || null)}
+                className="mt-4 w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+              />
+              <button
+                type="button"
+                onClick={handleVerify}
+                className="mt-4 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-300"
+              >
+                Verificar assinatura
+              </button>
+              {verificationResult && (
+                <div className="mt-4 rounded-xl border border-gray-800 bg-[#161B22]/80 p-3 text-sm text-slate-300">
+                  <p className="font-semibold text-white">{verificationResult.status}</p>
+                  <p className="mt-1">{verificationResult.detail}</p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -806,7 +1063,7 @@ export default function MainDashboard() {
             {[
               { label: "Assinaturas hoje", value: signatureCount },
               { label: "Arquivo carregado", value: uploadedFile ? "Sim" : "Aguardando" },
-              { label: "Se��o ativa", value: activeNav },
+              { label: "Seção ativa", value: activeNav },
             ].map((item) => (
               <div key={item.label} className="rounded-2xl border border-gray-800 bg-[#161B22]/80 p-4 shadow-[0_0_25px_rgba(0,0,0,0.18)]">
                 <p className="text-sm text-slate-400">{item.label}</p>
@@ -887,6 +1144,100 @@ export default function MainDashboard() {
                   <p className="mt-3 text-sm text-slate-400">
                     Depois de escanear o QR code, insira o código do app para habilitar a autenticação de dois fatores.
                   </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowChangePassword((current) => !current)}
+                    className="mt-4 rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-300"
+                  >
+                    {showChangePassword ? "Fechar alteração de senha" : "Alterar senha"}
+                  </button>
+                </div>
+              </div>
+
+              {showChangePassword && (
+                <form onSubmit={handleChangePassword} className="mt-6 rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
+                  <h3 className="text-lg font-semibold text-white">Alterar senha</h3>
+                  <div className="mt-4 grid gap-4 lg:grid-cols-3">
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-300">Senha atual</label>
+                      <input
+                        type="password"
+                        value={oldPassword}
+                        onChange={(event) => setOldPassword(event.target.value)}
+                        className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-300">Nova senha</label>
+                      <input
+                        type="password"
+                        value={newPassword}
+                        onChange={(event) => setNewPassword(event.target.value)}
+                        className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-300">Confirmar nova senha</label>
+                      <input
+                        type="password"
+                        value={confirmNewPassword}
+                        onChange={(event) => setConfirmNewPassword(event.target.value)}
+                        className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    className="mt-4 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-300"
+                  >
+                    Confirmar alteração
+                  </button>
+                </form>
+              )}
+
+              <div ref={signatureSectionRef} className="mt-6 rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-semibold text-white">Passkeys</h3>
+                    <p className="mt-2 text-sm text-slate-400">Registre e gerencie dispositivos WebAuthn para login sem senha.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={registerPasskey}
+                    className="rounded-xl border border-blue-400/30 bg-blue-500/10 px-4 py-2 text-sm font-semibold text-blue-300"
+                  >
+                    Registrar Passkey
+                  </button>
+                </div>
+                {passkeyMessage && <p className="mt-3 text-sm text-emerald-200">{passkeyMessage}</p>}
+                <button
+                  type="button"
+                  onClick={loadPasskeyDevices}
+                  disabled={loadingPasskeys}
+                  className="mt-4 rounded-xl border border-gray-700 bg-[#161B22] px-4 py-2 text-sm font-semibold text-slate-300 disabled:opacity-50"
+                >
+                  {loadingPasskeys ? "Carregando..." : "Atualizar dispositivos"}
+                </button>
+                <div className="mt-4 space-y-2">
+                  {passkeyDevices.length === 0 ? (
+                    <p className="text-sm text-slate-400">Nenhuma Passkey registrada ainda.</p>
+                  ) : (
+                    passkeyDevices.map((device) => (
+                      <div key={device.id} className="flex items-center justify-between rounded-lg border border-gray-700 bg-[#161B22]/60 px-3 py-2">
+                        <div>
+                          <p className="text-sm font-medium text-white">{device.credential_id_prefix || device.id}</p>
+                          <p className="text-xs text-slate-400">Contador: {device.sign_count}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => revokePasskeyDevice(device.id)}
+                          className="rounded px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/20"
+                        >
+                          Revogar
+                        </button>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
               {qrCodeImage && (
@@ -1015,7 +1366,7 @@ export default function MainDashboard() {
                       </div>
                     </>
                   ) : (
-                    <p className="text-sm text-slate-400">Use a busca para confirmar o estado de uma assinatura no ambiente público.</p>
+                    <p className="text-sm text-slate-400">Use o upload para confirmar o estado de uma assinatura no ambiente público.</p>
                   )}
                 </div>
               </div>
@@ -1042,7 +1393,7 @@ export default function MainDashboard() {
                 </div>
                 <p className="text-lg font-semibold text-white">Arraste e solte o PDF</p>
                 <p className="mt-2 text-sm text-slate-400">Ou clique para selecionar um arquivo do dispositivo</p>
-                <p className="mt-3 text-sm font-medium text-emerald-400">Tamanho m�ximo: 20MB</p>
+                <p className="mt-3 text-sm font-medium text-emerald-400">Tamanho máximo: 20MB</p>
                 <input type="file" accept="application/pdf" className="hidden" onChange={handleFileChange} />
               </label>
 
@@ -1117,7 +1468,7 @@ export default function MainDashboard() {
                 </div>
                 {signaturePreview && (
                   <div className="mt-3 rounded-xl border border-emerald-400/20 bg-emerald-500/10 p-3">
-                    <p className="text-sm font-medium text-emerald-200">Pr�-visualiza��o salva</p>
+                    <p className="text-sm font-medium text-emerald-200">Pré-visualização salva</p>
                     <img src={signaturePreview} alt="Assinatura salva" className="mt-2 h-14 w-full rounded-lg object-contain" />
                   </div>
                 )}
