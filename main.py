@@ -60,15 +60,13 @@ else:
         )
 
 # ---------- PROTEÇÃO CORS ----------
+# RNF-05: Origens dinâmicas retiradas do .env (sem hardcoding)
+allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "https://front-oficial.com,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173")
+origens_permitidas = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://front-oficial.com",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=origens_permitidas,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
@@ -85,9 +83,15 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Cache-Control"] = "no-store"
     response.headers["X-XSS-Protection"] = "0" 
+    
+    # REQ-43: Aplica o no-store APENAS nas rotas da API, protegendo a performance do Frontend (React)
+    if request.url.path.startswith("/api"):
+        response.headers["Cache-Control"] = "no-store"
+        
     return response
+
+# ---------- PADRONIZAÇÃO DE ERROS ----------
 
 # ---------- PADRONIZAÇÃO DE ERROS ----------
 
@@ -95,17 +99,17 @@ async def security_headers(request: Request, call_next):
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
     Defesa: RNF-14 - Padroniza os erros gerados pelas validações do Pydantic.
-    Evita a fuga do formato nativo do FastAPI (422) e mantém a consistência da API.
+    Lista detalhadamente os campos que falharam a validação sem esconder a informação.
     """
-    # Apanha o motivo do primeiro erro de validação para dar um feedback útil
-    erros = exc.errors()
-    mensagem_detalhe = erros[0].get("msg") if erros else "Dados fornecidos são inválidos."
+    # Mapeia todos os erros e constrói a lista detalhada para o Frontend
+    detalhes = [{"campo": ".".join(map(str, erro.get("loc", []))), "motivo": erro.get("msg")} for erro in exc.errors()]
     
     return JSONResponse(
-        status_code=status.HTTP_400_BAD_REQUEST, # Usamos 400 ou 422 consoante preferires
+        status_code=status.HTTP_400_BAD_REQUEST,
         content={
-            "code": "SYS_002",
-            "message": f"Falha na validação: {mensagem_detalhe}",
+            "code": "VAL_001",
+            "message": "Falha na validação dos dados enviados.",
+            "detalhes": detalhes,
             "timestamp": datetime.utcnow().isoformat()
         }
     )

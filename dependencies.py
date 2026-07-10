@@ -1,6 +1,7 @@
+import os
 from fastapi import Depends, HTTPException, Request, status
 import jwt
-import hashlib 
+import hashlib
 from sqlalchemy.orm import Session
 from models import DenylistToken
 from database import get_db
@@ -9,17 +10,14 @@ from security_engine import sec
 def validar_csrf(request: Request):
     """
     Defesa: REQ-65 - Verificação de Origin/Referer contra ataques CSRF
+    Defesa: RNF-05 - As origens são carregadas dinamicamente das variáveis de ambiente.
     """
     origem = request.headers.get("origin")
     referer = request.headers.get("referer")
     
-    origens_permitidas = [
-        "https://front-oficial.com",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ]
+    # RNF-05: Puxa do .env. O valor por defeito serve apenas como fallback para desenvolvimento local se a variável falhar
+    allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "https://front-oficial.com,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173")
+    origens_permitidas = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
     
     origem_cliente = origem or referer
     
