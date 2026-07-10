@@ -777,6 +777,7 @@ export default function MainDashboard() {
         method: "POST",
         credentials: "include",
         headers,
+        body: formData,
       });
 
       if (!response.ok) {
@@ -840,25 +841,49 @@ export default function MainDashboard() {
             </div>
           </div>
 
-          <div className="w-full border-t border-gray-800 bg-[#0D1117]/80 p-8 sm:p-10 lg:w-[430px] lg:border-l lg:border-t-0">
-            <form onSubmit={handleAuthSubmit} className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-emerald-400">{authMode === "login" ? "Login" : "Cadastro"}</p>
-                  <h3 className="mt-1 text-2xl font-semibold text-white">{authMode === "login" ? "Bem-vindo de volta" : "Criar conta"}</h3>
+          <div className="w-full border-t border-gray-800 bg-[#0D1117]/90 p-8 sm:p-10 lg:w-[460px] lg:border-l lg:border-t-0 lg:px-10 lg:py-12">
+            <form onSubmit={handleAuthSubmit} className="space-y-6">
+              <div className="mb-8">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.35em] text-emerald-400">{authMode === "login" ? "Acesso" : "Cadastro"}</p>
+                    <h3 className="mt-3 text-3xl font-semibold text-white">{authMode === "login" ? "Entrar na conta" : "Criar conta"}</h3>
+                  </div>
+                  <div className="inline-flex overflow-hidden rounded-full border border-gray-800 bg-[#161B22]/70 p-1 shadow-[0_10px_30px_rgba(0,0,0,0.15)]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthMode("login");
+                        setAuthError("");
+                        setSuccessMessage("");
+                        resetAuthForm();
+                      }}
+                      className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                        authMode === "login"
+                          ? "bg-emerald-500/15 text-emerald-200"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      Entrar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthMode("register");
+                        setAuthError("");
+                        setSuccessMessage("");
+                        resetAuthForm();
+                      }}
+                      className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                        authMode === "register"
+                          ? "bg-emerald-500/15 text-emerald-200"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      Criar conta
+                    </button>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode(authMode === "login" ? "register" : "login");
-                    setAuthError("");
-                    setSuccessMessage("");
-                    resetAuthForm();
-                  }}
-                  className="text-sm font-semibold text-emerald-400"
-                >
-                  {authMode === "login" ? "Criar conta" : "Entrar"}
-                </button>
               </div>
 
               {authMode === "register" && (
@@ -868,7 +893,7 @@ export default function MainDashboard() {
                     type="text"
                     value={name}
                     onChange={(event) => setName(event.target.value)}
-                    className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+                    className="w-full rounded-3xl border border-gray-800 bg-[#161B22] px-4 py-4 text-sm text-white outline-none transition duration-200 focus:border-emerald-400/50"
                     placeholder="Seu nome completo"
                     required
                   />
@@ -881,7 +906,7 @@ export default function MainDashboard() {
                   type="email"
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+                  className="w-full rounded-3xl border border-gray-800 bg-[#161B22] px-4 py-4 text-sm text-white outline-none transition duration-200 focus:border-emerald-400/50"
                   placeholder="seu@email.com"
                   required
                 />
@@ -893,7 +918,7 @@ export default function MainDashboard() {
                   type="password"
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+                  className="w-full rounded-3xl border border-gray-800 bg-[#161B22] px-4 py-4 text-sm text-white outline-none transition duration-200 focus:border-emerald-400/50"
                   placeholder="Sua senha"
                   required
                 />
@@ -906,43 +931,45 @@ export default function MainDashboard() {
                     type="password"
                     value={confirmPassword}
                     onChange={(event) => setConfirmPassword(event.target.value)}
-                    className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+                    className="w-full rounded-3xl border border-gray-800 bg-[#161B22] px-4 py-4 text-sm text-white outline-none transition duration-200 focus:border-emerald-400/50"
                     placeholder="Repita a senha"
                     required
                   />
                 </div>
               )}
 
-              {twoFactorRequired && (
+              {authMode === "login" && twoFactorRequired && (
                 <div>
                   <label className="mb-2 block text-sm font-medium text-slate-300">Código TOTP</label>
                   <input
                     type="text"
                     value={totpCode}
                     onChange={(event) => setTotpCode(event.target.value)}
-                    className="w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
+                    className="w-full rounded-3xl border border-gray-800 bg-[#161B22] px-4 py-4 text-sm text-white outline-none transition duration-200 focus:border-emerald-400/50"
                     placeholder="123456"
                     required
                   />
                 </div>
               )}
 
-              {authError && <p className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-300">{authError}</p>}
-              {successMessage && <p className="rounded-xl border border-emerald-400/20 bg-emerald-500/10 p-3 text-sm text-emerald-200">{successMessage}</p>}
+              {authError && <p className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-300">{authError}</p>}
+              {successMessage && <p className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 p-3 text-sm text-emerald-200">{successMessage}</p>}
 
-              <button
-                type="button"
-                onClick={loginWithPasskey}
-                disabled={isLoading}
-                className="flex w-full items-center justify-center gap-2 rounded-2xl border border-blue-400/30 bg-blue-500/10 px-4 py-3 text-sm font-semibold text-blue-300 transition hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-80"
-              >
-                {isLoading ? "Aguarde..." : "Entrar com Passkey"}
-              </button>
+              {authMode === "login" && (
+                <button
+                  type="button"
+                  onClick={loginWithPasskey}
+                  disabled={isLoading}
+                  className="flex w-full items-center justify-center gap-2 rounded-3xl border border-blue-400/30 bg-blue-500/10 px-4 py-4 text-sm font-semibold text-blue-300 transition hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-80"
+                >
+                  {isLoading ? "Aguarde..." : "Entrar com Passkey"}
+                </button>
+              )}
 
               <button
                 type="submit"
                 disabled={isLoading}
-                className="flex w-full items-center justify-center gap-2 rounded-2xl border border-emerald-400/30 bg-[#00E676] px-4 py-3 text-sm font-semibold text-[#04110A] transition hover:shadow-[0_0_25px_rgba(0,230,118,0.3)] disabled:cursor-not-allowed disabled:opacity-80"
+                className="mt-2 flex w-full items-center justify-center gap-2 rounded-3xl border border-emerald-400/30 bg-[#00E676] px-4 py-4 text-base font-semibold text-[#04110A] transition duration-200 hover:shadow-[0_0_25px_rgba(0,230,118,0.3)] disabled:cursor-not-allowed disabled:opacity-80"
               >
                 {isLoading ? (
                   <>
@@ -959,30 +986,6 @@ export default function MainDashboard() {
                 )}
               </button>
             </form>
-
-            <div className="mt-6 rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
-              <p className="text-sm font-medium text-emerald-400">Verificação pública</p>
-              <p className="mt-2 text-sm text-slate-400">Envie um PDF para validar a assinatura sem precisar de login.</p>
-              <input
-                type="file"
-                accept="application/pdf"
-                onChange={(event) => setVerificationFile(event.target.files?.[0] || null)}
-                className="mt-4 w-full rounded-xl border border-gray-800 bg-[#161B22] px-4 py-3 text-sm text-white outline-none transition focus:border-emerald-400/50"
-              />
-              <button
-                type="button"
-                onClick={handleVerify}
-                className="mt-4 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-300"
-              >
-                Verificar assinatura
-              </button>
-              {verificationResult && (
-                <div className="mt-4 rounded-xl border border-gray-800 bg-[#161B22]/80 p-3 text-sm text-slate-300">
-                  <p className="font-semibold text-white">{verificationResult.status}</p>
-                  <p className="mt-1">{verificationResult.detail}</p>
-                </div>
-              )}
-            </div>
           </div>
         </div>
       </div>
@@ -992,7 +995,7 @@ export default function MainDashboard() {
   return (
     <div className="min-h-screen bg-[#0D1117] text-slate-100">
       <div className="mx-auto flex min-h-screen max-w-7xl flex-col lg:flex-row">
-        <aside className="w-full border-b border-gray-800 bg-[#0D1117]/80 px-4 py-6 backdrop-blur-xl lg:w-72 lg:border-b-0 lg:border-r lg:px-6">
+        <aside className="w-full border-b border-gray-800 bg-[#0D1117]/80 px-4 py-6 backdrop-blur-xl lg:w-72 lg:border-b-0 lg:border-r lg:px-6 lg:pt-8">
           <div className="mb-8 flex items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-emerald-400/30 bg-emerald-500/10 text-lg font-semibold text-[#00E676]">
               S
@@ -1012,7 +1015,7 @@ export default function MainDashboard() {
                   onClick={() => setActiveNav(item)}
                   className={`flex w-full items-center justify-between rounded-xl px-4 py-3 text-left text-sm font-medium transition-all ${
                     isActive
-                      ? "border border-emerald-400/30 bg-emerald-500/10 text-[#00E676] shadow-[0_0_20px_rgba(0,230,118,0.15)]"
+                      ? "border border-emerald-400/30 bg-[#08231F] text-[#00E676] shadow-[0_0_25px_rgba(0,230,118,0.18)]"
                       : "border border-transparent bg-transparent text-slate-300 hover:border-gray-700 hover:bg-[#161B22]"
                   }`}
                 >
@@ -1023,8 +1026,8 @@ export default function MainDashboard() {
             })}
           </nav>
 
-          <div className="mt-8 rounded-xl border border-gray-800 bg-[#161B22]/80 p-4 shadow-[0_0_30px_rgba(0,0,0,0.25)]">
-            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Status do sistema</p>
+          <div className="mt-8 rounded-[28px] border border-gray-800 bg-[#161B22]/80 p-4 shadow-[0_0_30px_rgba(0,0,0,0.25)]">
+            <p className="text-xs uppercase tracking-[0.29em] text-slate-500">Status do sistema</p>
             <div className="mt-3 flex items-center gap-2">
               <span className="h-2.5 w-2.5 rounded-full bg-[#00E676] shadow-[0_0_8px_#00E676]" />
               <span className="text-sm text-slate-200">Opera��o segura online</span>
@@ -1034,11 +1037,11 @@ export default function MainDashboard() {
         </aside>
 
         <main className="flex-1 p-4 sm:p-6 lg:p-8">
-          <header className="mb-6 flex flex-col gap-4 rounded-2xl border border-gray-800 bg-[#161B22]/70 p-4 shadow-[0_0_30px_rgba(0,0,0,0.2)] backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between">
+          <header className="mb-6 flex flex-col gap-4 rounded-[32px] border border-gray-800 bg-[#121A23]/90 p-6 shadow-[0_0_40px_rgba(0,0,0,0.26)] backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-sm font-medium text-emerald-400">Dashboard principal</p>
-              <h1 className="text-2xl font-semibold text-white">Assinatura digital de documentos</h1>
-              <p className="mt-1 text-sm text-slate-400">{statusMessage}</p>
+              <h1 className="text-3xl font-semibold text-white sm:text-4xl">Assinatura digital de documentos</h1>
+              <p className="mt-2 text-sm text-slate-400">{statusMessage}</p>
             </div>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-3 rounded-xl border border-gray-800 bg-[#0D1117]/80 px-3 py-2">
@@ -1065,9 +1068,9 @@ export default function MainDashboard() {
               { label: "Arquivo carregado", value: uploadedFile ? "Sim" : "Aguardando" },
               { label: "Seção ativa", value: activeNav },
             ].map((item) => (
-              <div key={item.label} className="rounded-2xl border border-gray-800 bg-[#161B22]/80 p-4 shadow-[0_0_25px_rgba(0,0,0,0.18)]">
-                <p className="text-sm text-slate-400">{item.label}</p>
-                <p className="mt-2 text-2xl font-semibold text-white">{item.value}</p>
+              <div key={item.label} className="rounded-[32px] border border-gray-800 bg-[#0B1218]/85 p-5 shadow-[0_0_35px_rgba(0,0,0,0.16)] backdrop-blur-xl">
+                <p className="text-sm uppercase tracking-[0.25em] text-slate-500">{item.label}</p>
+                <p className="mt-3 text-3xl font-semibold text-white">{item.value}</p>
               </div>
             ))}
           </section>
@@ -1195,7 +1198,7 @@ export default function MainDashboard() {
                 </form>
               )}
 
-              <div ref={signatureSectionRef} className="mt-6 rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
+              <div className="mt-6 rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h3 className="text-lg font-semibold text-white">Passkeys</h3>
@@ -1372,9 +1375,9 @@ export default function MainDashboard() {
               </div>
             </section>
           ) : (
-            <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-              <div className="rounded-2xl border border-gray-800 bg-[#161B22]/80 p-5 shadow-[0_0_35px_rgba(0,0,0,0.2)] backdrop-blur-xl">
-              <div className="mb-5 flex items-center justify-between">
+            <section ref={signatureSectionRef} className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+              <div className="rounded-[32px] border border-gray-800 bg-[#0B1218]/90 p-6 shadow-[0_0_40px_rgba(0,0,0,0.24)] backdrop-blur-xl">
+              <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <p className="text-sm font-medium text-emerald-400">Novo documento</p>
                   <h2 className="text-xl font-semibold text-white">Carregar PDF para assinatura</h2>
@@ -1384,8 +1387,8 @@ export default function MainDashboard() {
                 </div>
               </div>
 
-              <label className="group flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-emerald-400/30 bg-[#0D1117]/80 px-6 py-10 text-center transition hover:border-[#00E676] hover:bg-emerald-500/5">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full border border-emerald-400/30 bg-emerald-500/10 text-[#00E676]">
+              <label className="group flex cursor-pointer flex-col items-center justify-center rounded-[32px] border border-dashed border-emerald-400/40 bg-[#0D1118]/80 px-6 py-12 text-center transition hover:border-[#00E676] hover:bg-emerald-500/10 shadow-[inset_0_0_0_1px_rgba(0,230,118,0.06)]">
+                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full border border-emerald-400/30 bg-[#081913] text-[#00E676]">
                   <svg viewBox="0 0 24 24" className="h-8 w-8" fill="none" stroke="currentColor" strokeWidth="1.8">
                     <path d="M12 16V4m0 0l-4 4m4-4l4 4" strokeLinecap="round" strokeLinejoin="round" />
                     <path d="M5 16v1a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-1" strokeLinecap="round" />
@@ -1393,7 +1396,7 @@ export default function MainDashboard() {
                 </div>
                 <p className="text-lg font-semibold text-white">Arraste e solte o PDF</p>
                 <p className="mt-2 text-sm text-slate-400">Ou clique para selecionar um arquivo do dispositivo</p>
-                <p className="mt-3 text-sm font-medium text-emerald-400">Tamanho máximo: 20MB</p>
+                <p className="mt-4 text-sm font-semibold text-emerald-400">Tamanho máximo: 20MB</p>
                 <input type="file" accept="application/pdf" className="hidden" onChange={handleFileChange} />
               </label>
 
@@ -1477,7 +1480,7 @@ export default function MainDashboard() {
               <button
                 onClick={handleSign}
                 disabled={isSigning}
-                className="mt-6 flex w-full items-center justify-center gap-3 rounded-2xl border border-emerald-400/30 bg-[#00E676] px-5 py-4 text-lg font-semibold text-[#04110A] transition hover:shadow-[0_0_30px_rgba(0,230,118,0.35)] disabled:cursor-not-allowed disabled:opacity-80"
+                className="mt-6 flex w-full items-center justify-center gap-3 rounded-[32px] bg-gradient-to-r from-[#00E676] via-[#31EC90] to-[#22DD6F] px-5 py-5 text-lg font-semibold text-[#04110A] shadow-[0_20px_80px_rgba(0,230,118,0.24)] transition hover:shadow-[0_0_45px_rgba(0,230,118,0.35)] disabled:cursor-not-allowed disabled:opacity-70"
               >
                 {isSigning ? (
                   <>
@@ -1495,13 +1498,13 @@ export default function MainDashboard() {
                 type="button"
                 onClick={handleDownloadPdf}
                 disabled={!signedPdfUrl}
-                className="mt-3 flex w-full items-center justify-center rounded-2xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-3 text-sm font-semibold text-emerald-300 transition disabled:cursor-not-allowed disabled:opacity-60"
+                className="mt-3 flex w-full items-center justify-center rounded-[32px] border border-emerald-400/20 bg-[#0F181F]/85 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-[#131E27] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 Baixar PDF assinado
               </button>
             </div>
 
-            <div className="rounded-2xl border border-gray-800 bg-[#161B22]/80 p-5 shadow-[0_0_35px_rgba(0,0,0,0.2)] backdrop-blur-xl">
+            <div className="rounded-[32px] border border-gray-800 bg-[#0B1218]/90 p-5 shadow-[0_0_35px_rgba(0,0,0,0.2)] backdrop-blur-xl">
               <div className="mb-4 flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-emerald-400">Auditoria</p>

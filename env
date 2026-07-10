@@ -1,0 +1,10 @@
+#defesa:RNF-05.variaveis de ambiente seguras q n vao pro github
+DB_CONNECTION_STRING=postgresql+psycopg2://postgres:1234@localhost:5432/assinador
+MASTER_KEY=TP03mkdfutdLFbZJxodzWOCaQfF2tKa5nEXo9EVVYvs=
+#defesa:REQ-58.credenciais SMTP para notificações de segurança
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=seuemail@gmail.com
+SMTP_PASSWORD= abcd efgh ijkl mnop 
+SMTP_FROM=seuemail@gmail.com
+ALLOWED_ORIGINS=https://front-oficial.com,http://localhost:3001,http://127.0.0.1:3001,http://localhost:5173,http://127.0.0.1:5173
