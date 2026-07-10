@@ -95,7 +95,7 @@ class RegisterRequest(BaseModel):
     @field_validator('password')
     @classmethod
     def validate_password_complexity(cls, v):
-        pattern = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{12,}$"p
+        pattern = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{12,}$"
         if not re.match(pattern, v):
             raise ValueError("A senha não atende aos requisitos mínimos de complexidade.")
         return v
