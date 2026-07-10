@@ -58,28 +58,31 @@ def get_current_active_user(request: Request, db: Session = Depends(get_db)):
     token = auth_header.split(" ")[1]
     
     try:
-        # 1. Descodifica e valida a assinatura usando a chave pública (RS256)
         payload = jwt.decode(token, sec.jwt_pub_pem, algorithms=["RS256"])
         jti = payload.get("jti")
         user_id = payload.get("sub")
+        iat = payload.get("iat") # Extrai a hora de emissão do token
         
-        # 2. Verifica se o JTI está na Denylist (Logout realizado)
         if db.query(DenylistToken).filter(DenylistToken.jti == jti).first():
             raise HTTPException(status_code=401, detail="Token revogado (Logout realizado)")
+
+        # Puxamos o utilizador para validar eventos que ocorreram DEPOIS do token ser emitido
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="Utilizador inexistente.")
+
+        # FIX REQ-25: Invalidação de Sessões Anteriores à Troca de Senha
+        if user.last_password_change and iat:
+            token_emitted_at = datetime.utcfromtimestamp(iat)
+            # Se o token foi gerado antes da última mudança de senha, é lixo!
+            if token_emitted_at < user.last_password_change:
+                raise HTTPException(status_code=401, detail="Sessão expirada. A senha da conta foi alterada recentemente.")
             
-        # 3. Defesa REQ-26 e REQ-27: Fingerprint Check (Anti-Roubo de Token)
-        current_ip = request.client.host
-        current_ua = request.headers.get("user-agent", "")
+        current_ip_hash = hashlib.sha256(request.client.host.encode('utf-8')).hexdigest()
+        current_ua_hash = hashlib.sha256(request.headers.get("user-agent", "").encode('utf-8')).hexdigest()
         
-        current_ip_hash = hashlib.sha256(current_ip.encode('utf-8')).hexdigest()
-        current_ua_hash = hashlib.sha256(current_ua.encode('utf-8')).hexdigest()
-        
-        # Se o token foi roubado e está a ser usado noutra rede ou navegador, a requisição é bloqueada
-        if payload.get("ip_hash") != current_ip_hash:
-            raise HTTPException(status_code=401, detail="Token inválido: Alteração de rede (IP) detetada.")
-            
-        if payload.get("ua_hash") != current_ua_hash:
-            raise HTTPException(status_code=401, detail="Token inválido: Alteração de dispositivo/navegador detetada.")
+        if payload.get("ip_hash") != current_ip_hash or payload.get("ua_hash") != current_ua_hash:
+            raise HTTPException(status_code=401, detail="Token inválido: Alteração de rede/dispositivo detetada.")
             
         return user_id 
         

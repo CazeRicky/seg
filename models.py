@@ -20,6 +20,11 @@ class User(Base):
     backup_codes = Column(Text) #defesa:REQ-14.hashes dos codigos de backup
     failed_login_attempts = Column(Integer, default=0)
     locked_until = Column(DateTime, nullable=True)
+    # FIX REQ-16: Bloqueio por múltiplas falhas de TOTP
+    failed_totp_attempts = Column(Integer, default=0)
+    
+    # FIX REQ-25: Timestamp para invalidar JWTs antigos
+    last_password_change = Column(DateTime, default=datetime.datetime.utcnow)
 
 class WebAuthnPasskey(Base):
     __tablename__ = "webauthn_passkeys"

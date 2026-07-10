@@ -16,25 +16,19 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-# Importa as tabelas da base de dados que estão no ficheiro models.py
 from dependencies import validar_csrf, get_current_active_user
-
-# Importa a função que fornece a sessão da base de dados
 from database import get_db
-
-# Importações dos seus modelos e banco de dados
 from models import User, RefreshSession, DenylistToken, AuditLog, WebAuthnPasskey
 from security_engine import sec
-
-# Importações do WebAuthn (FIDO2)
 from webauthn import (
     generate_registration_options, verify_registration_response,
     generate_authentication_options, verify_authentication_response
 )
 from webauthn.helpers.structs import RegistrationCredential, AuthenticationCredential
+from pydantic import BaseModel, field_validator
 
 # Configurações do Relying Party
-RP_ID = "localhost" 
+RP_ID = os.getenv("RP_ID")
 RP_NAME = "Sistema de Assinaturas UABJ"
 ORIGIN = "http://localhost:3000" 
 
@@ -76,28 +70,33 @@ def enviar_email_notificacao(destinatario: str, assunto: str, corpo: str) -> boo
 class LoginRequest(BaseModel):
     username: str
     password: str
-    totp_code: str = None 
+    totp_code: str = None
 
-    @field_validator('password')
+    # FIX REQ-64: Escudo Anti-XSS que deteta scripts antes de o backend processar
+    @field_validator('username', 'password', 'totp_code', mode='before')
     @classmethod
-    def validate_password_complexity(cls, v):
-        # Defesa: REQ-01. Mínimo 12 chars, 1 maiúscula, 1 minúscula, 1 número, 1 símbolo
-        pattern = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{12,}$"
-        if not re.match(pattern, v):
-            raise ValueError("A senha não atende aos requisitos mínimos de complexidade.")
+    def prevent_xss(cls, v):
+        if isinstance(v, str) and re.search(r"[<>]", v):
+            raise ValueError("Caracteres proibidos detetados (possível ataque XSS).")
         return v
 
-class RegisterRequest(BaseModel):
-    username: str
-    password: str
-    email: EmailStr
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
 
-    @field_validator('password')
+    @field_validator('old_password', 'new_password', mode='before')
+    @classmethod
+    def prevent_xss(cls, v):
+        if isinstance(v, str) and re.search(r"[<>]", v):
+            raise ValueError("Caracteres proibidos detetados (possível ataque XSS).")
+        return v
+
+    @field_validator('new_password')
     @classmethod
     def validate_password_complexity(cls, v):
         pattern = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{12,}$"
         if not re.match(pattern, v):
-            raise ValueError("A senha não atende aos requisitos mínimos de complexidade.")
+            raise ValueError("A nova senha não atende aos requisitos mínimos.")
         return v
 
 class ChangePasswordRequest(BaseModel):
@@ -191,15 +190,26 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
 
         # 3. Se ambos falharem, bloqueia e avisa
         if not is_totp_valid and not is_backup_valid:
-            db.add(AuditLog(user_id=user.id, action="LOGIN_FAILED_2FA", ip_address=request.client.host))
+            # FIX REQ-16: Sistema de strikes para o TOTP
+            user.failed_totp_attempts += 1
+            
+            if user.failed_totp_attempts >= 3:
+                user.locked_until = datetime.utcnow() + timedelta(minutes=15)
+                db.add(AuditLog(user_id=user.id, action="LOGIN_FAILED_2FA_LOCKED", ip_address=request.client.host))
+                db.commit()
+                if user.email:
+                    enviar_email_notificacao(
+                        user.email,
+                        "Alerta Crítico: Múltiplas falhas no 2FA",
+                        f"A sua conta foi bloqueada por 15 minutos após múltiplas tentativas de contornar o código 2FA a partir do IP {request.client.host}."
+                    )
+                raise HTTPException(status_code=403, detail={"code": "AUTH_004", "message": "Conta bloqueada por múltiplas falhas no 2FA."})
+            
             db.commit()
-            if user.email:
-                enviar_email_notificacao(
-                    user.email,
-                    "Alerta de Segurança: Falha no 2FA",
-                    f"Registramos uma tentativa de login com falha no código de dois fatores (TOTP/Backup) a partir do IP {request.client.host}."
-                )
             raise HTTPException(status_code=401, detail={"code": "AUTH_003", "message": "Código 2FA ou de recuperação inválido"})
+
+        # Se acertou no 2FA, zera o contador de erros:
+        user.failed_totp_attempts = 0
 
     session_id = str(uuid.uuid4())
     access_jwt, jti = sec.generate_access_token(user.id, request.client.host, request.headers.get("user-agent", ""), session_id)
@@ -676,6 +686,7 @@ def change_password_endpoint(
 
     # 3. Atualiza o hash na base de dados utilizando Argon2id (configuração OWASP)
     user.password_hash = sec.hash_password(req.new_password)
+    user.last_password_change = datetime.utcnow()
     
     # 4. Defesa de Alta Segurança: Revoga todas as sessões ativas (obriga a novo login em todos os dispositivos)
     db.query(RefreshSession).filter(RefreshSession.user_id == current_user_id).update({"is_revoked": True})
