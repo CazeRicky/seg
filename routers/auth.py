@@ -22,13 +22,15 @@ from models import User, RefreshSession, DenylistToken, AuditLog, WebAuthnPasske
 from security_engine import sec
 from webauthn import (
     generate_registration_options, verify_registration_response,
-    generate_authentication_options, verify_authentication_response
+    generate_authentication_options, verify_authentication_response,
+    options_to_json,
 )
 from webauthn.helpers.structs import RegistrationCredential, AuthenticationCredential
 from pydantic import BaseModel, field_validator
+import traceback
 
 # Configurações do Relying Party
-RP_ID = os.getenv("RP_ID")
+RP_ID = os.getenv("RP_ID", "localhost")
 RP_NAME = "Sistema de Assinaturas UABJ"
 ORIGIN = "http://localhost:3000" 
 
@@ -80,6 +82,37 @@ class LoginRequest(BaseModel):
             raise ValueError("Caracteres proibidos detetados (possível ataque XSS).")
         return v
 
+class RegisterRequest(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+    confirm_password: str = None
+
+    @field_validator('username', 'password', 'confirm_password', 'email', mode='before')
+    @classmethod
+    def prevent_xss(cls, v):
+        if isinstance(v, str) and re.search(r"[<>]", v):
+            raise ValueError("Caracteres proibidos detetados (possível ataque XSS).")
+        return v
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_complexity(cls, v):
+        pattern = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{12,}$"
+        if not re.match(pattern, v):
+            raise ValueError("A senha não atende aos requisitos mínimos de complexidade.")
+        return v
+
+    @field_validator('confirm_password')
+    @classmethod
+    def validate_password_match(cls, v, info):
+        # Se confirm_password não foi enviado (None), ignora a validação
+        if v is None:
+            return v
+        if 'password' in info.data and v != info.data['password']:
+            raise ValueError('As senhas não conferem.')
+        return v
+
 class ChangePasswordRequest(BaseModel):
     old_password: str
     new_password: str
@@ -124,7 +157,10 @@ def generate_csrf_token() -> str:
 @router.post("/login")
 @limiter.limit("10/minute")
 def login_endpoint(req: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == req.username).first()
+    # Aceita login por username OU por e-mail
+    user = db.query(User).filter(
+        (User.username == req.username) | (User.email == req.username.lower())
+    ).first()
     
     if not user:
         raise HTTPException(status_code=401, detail={"code": "AUTH_001", "message": "Credenciais inválidas"})
@@ -251,46 +287,65 @@ def login_endpoint(req: LoginRequest, request: Request, response: Response, db: 
 # ==========================================
 @router.post("/register")
 def register_endpoint(req: RegisterRequest, request: Request, db: Session = Depends(get_db)):
-    existing = db.query(User).filter((User.username == req.username) | (User.email == req.email.lower())).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="Nome de usuário ou e-mail já registrado")
+    print("REGISTER endpoint called", req)
+    try:
+        existing = db.query(User).filter((User.username == req.username) | (User.email == req.email.lower())).first()
+        print("existing user check done", existing)
+        if existing:
+            raise HTTPException(status_code=409, detail="Nome de usuário ou e-mail já registrado")
 
-    user_id = str(uuid.uuid4())
-    password_hash = sec.hash_password(req.password)
-    rsa_priv_encrypted, rsa_pub = sec.generate_user_rsa_keys(req.username)
+        user_id = str(uuid.uuid4())
+        password_hash = sec.hash_password(req.password)
+        print("password hashed")
+        rsa_priv_encrypted, rsa_pub = sec.generate_user_rsa_keys(req.username)
+        print("rsa keys generated")
 
-    user = User(
-        id=user_id,
-        username=req.username,
-        email=req.email.lower(),
-        password_hash=password_hash,
-        rsa_pub=rsa_pub,
-        rsa_priv_encrypted=rsa_priv_encrypted,
-        is_totp_enabled=False,
-        totp_secret=None,
-        backup_codes=None
-    )
-
-    db.add(user)
-    db.add(AuditLog(user_id=user_id, action="USER_REGISTERED", ip_address=request.client.host, user_agent=request.headers.get("user-agent", ""), details=json.dumps({"username": req.username})))
-    db.commit()
-
-    if user.email:
-        enviar_email_notificacao(
-            user.email,
-            "Bem-vindo ao SecureSign",
-            f"Sua conta foi criada com sucesso com o usuário {user.username}."
+        user = User(
+            id=user_id,
+            username=req.username,
+            email=req.email.lower(),
+            password_hash=password_hash,
+            rsa_pub=rsa_pub,
+            rsa_priv_encrypted=rsa_priv_encrypted,
+            is_totp_enabled=False,
+            totp_secret=None,
+            backup_codes=None
         )
 
-    return {
-        "message": "Usuário registrado com sucesso",
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "is_totp_enabled": user.is_totp_enabled,
+        db.add(user)
+        db.add(AuditLog(user_id=user_id, action="USER_REGISTERED", ip_address=request.client.host, user_agent=request.headers.get("user-agent", ""), details=json.dumps({"username": req.username})))
+        print("user and audit log added to session")
+        db.commit()
+        print("db commit succeeded")
+
+        if user.email:
+            enviar_email_notificacao(
+                user.email,
+                "Bem-vindo ao SecureSign",
+                f"Sua conta foi criada com sucesso com o usuário {user.username}."
+            )
+            print("email notification attempted")
+
+        return {
+            "message": "Usuário registrado com sucesso",
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "is_totp_enabled": user.is_totp_enabled,
+            }
         }
-    }
+    except HTTPException:
+        # Re-raise HTTPException (validation/expected errors)
+        raise
+    except Exception as e:
+        print("REGISTER endpoint exception", type(e).__name__, str(e))
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
+        # Re-raise to be handled by global exception handler
+        raise
 
 # ==========================================
 # 3. CONFIGURAÇÃO DO TOTP (REQ-12, REQ-13, REQ-14)
@@ -308,7 +363,6 @@ def setup_totp(request: Request, db: Session = Depends(get_db), current_user_id:
     backup_codes = [secrets.token_hex(4) for _ in range(8)]
     backup_codes_hashes = [sec.hash_password(code) for code in backup_codes]
     user.totp_secret = sec.encrypt_data(totp_secret)
-    user.totp_secret = totp_secret
     user.backup_codes = json.dumps(backup_codes_hashes)
     db.commit()
 
@@ -335,14 +389,11 @@ def setup_totp(request: Request, db: Session = Depends(get_db), current_user_id:
 @router.post("/totp/enable")
 def enable_totp(req: TotpEnableRequest, request: Request, db: Session = Depends(get_db), current_user_id: str = Depends(get_current_active_user)):
     user = db.query(User).filter(User.id == current_user_id).first()
-    decrypted_secret = sec.decrypt_data(user.totp_secret)
-    if not sec.verify_totp(decrypted_secret, req.totp_code):
-        raise HTTPException(status_code=401, detail="Código TOTP inválido")
-    
     if not user or not user.totp_secret:
         raise HTTPException(status_code=400, detail="Configuração TOTP não encontrada")
 
-    if not sec.verify_totp(user.totp_secret, req.totp_code):
+    decrypted_secret = sec.decrypt_data(user.totp_secret)
+    if not sec.verify_totp(decrypted_secret, req.totp_code):
         raise HTTPException(status_code=401, detail="Código TOTP inválido")
 
     user.is_totp_enabled = True
@@ -376,7 +427,7 @@ def webauthn_register_generate(current_user_id: str = Depends(get_current_active
     )
     
     challenge_cache[user.id] = options.challenge
-    return json.loads(options.json())
+    return json.loads(options_to_json(options))
 
 @router.post("/webauthn/register/verify")
 def webauthn_register_verify(req_data: dict, current_user_id: str = Depends(get_current_active_user), db: Session = Depends(get_db)):
@@ -423,7 +474,7 @@ def webauthn_auth_generate(req: WebauthnAuthRequest, db: Session = Depends(get_d
 
     options = generate_authentication_options(rp_id=RP_ID)
     challenge_cache[user.id] = options.challenge
-    return json.loads(options.json())
+    return json.loads(options_to_json(options))
 
 @router.post("/webauthn/authenticate/verify")
 def webauthn_auth_verify(req_data: dict, request: Request, response: Response, db: Session = Depends(get_db)):

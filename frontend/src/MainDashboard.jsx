@@ -1,4 +1,58 @@
 import React, { useEffect, useRef, useState } from "react";
+import * as pdfjsLib from "pdfjs-dist";
+
+// Worker para pdf.js
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.mjs",
+  import.meta.url
+).toString();
+
+// ─── Componente de visualização de uma página do PDF ────────────────────────
+function PdfPage({ pdfDoc, pageNumber, scale, isSelected, marker, onClick }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    if (!pdfDoc || !canvasRef.current) return;
+    let cancelled = false;
+    pdfDoc.getPage(pageNumber).then((page) => {
+      if (cancelled) return;
+      const viewport = page.getViewport({ scale });
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      page.render({ canvasContext: canvas.getContext("2d"), viewport });
+    });
+    return () => { cancelled = true; };
+  }, [pdfDoc, pageNumber, scale]);
+
+  return (
+    <div
+      className="relative mb-3 cursor-crosshair select-none"
+      style={{ border: isSelected ? "2px solid #00E676" : "2px solid transparent", borderRadius: 4 }}
+      onClick={onClick}
+    >
+      <canvas ref={canvasRef} style={{ display: "block", width: "100%" }} />
+      {marker && (
+        <div
+          style={{
+            position: "absolute",
+            left: marker.pctX * 100 + "%",
+            top: marker.pctY * 100 + "%",
+            transform: "translate(-50%, -50%)",
+            pointerEvents: "none",
+          }}
+        >
+          <div className="h-6 w-6 rounded-full border-2 border-[#00E676] bg-[#00E676]/30 shadow-[0_0_8px_#00E676]" />
+          <span className="absolute left-7 top-0 whitespace-nowrap rounded bg-[#0D1117]/90 px-1 text-xs text-[#00E676]">
+            Pg {pageNumber}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 const initialActivity = [
   { hash: "0x8A1F...2C9D", date: "01/07/2026 14:32", status: "Assinado", detail: "Contrato de parceria" },
@@ -8,7 +62,7 @@ const initialActivity = [
 
 const navItems = ["Dashboard", "Security & 2FA", "Public Verification"];
 const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,}$/;
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
+const API_BASE = "/api/v1";
 
 export default function MainDashboard() {
   const canvasRef = useRef(null);
@@ -45,6 +99,11 @@ export default function MainDashboard() {
   const [backupCodes, setBackupCodes] = useState([]);
   const [signedPdfUrl, setSignedPdfUrl] = useState(null);
   const [signedPdfName, setSignedPdfName] = useState("");
+  // PDF viewer state
+  const [pdfDoc, setPdfDoc] = useState(null);
+  const [pdfTotalPages, setPdfTotalPages] = useState(0);
+  const [pdfScale, setPdfScale] = useState(1.2);
+  const [signPosition, setSignPosition] = useState({ x: 100, y: 100, page: 1, pctX: 0.1, pctY: 0.9, canvasH: 1 });
   const [refreshingSession, setRefreshingSession] = useState(false);
   const [allSessions, setAllSessions] = useState([]);
   const [showActiveSessions, setShowActiveSessions] = useState(false);
@@ -69,6 +128,8 @@ export default function MainDashboard() {
 
   useEffect(() => {
     const restore = async () => {
+      const cookieExists = document.cookie.includes("refresh_token=") || document.cookie.includes("csrf_token=");
+      if (!cookieExists) return;
       try {
         await refreshSession();
       } catch (error) {
@@ -152,11 +213,17 @@ export default function MainDashboard() {
     const csrfTokenValue = csrfToken || getCsrfTokenFromCookie();
     const csrfHeaders = csrfTokenValue ? { "X-CSRF-Token": csrfTokenValue } : {};
     const headers = { ...defaultHeaders, ...authHeaders, ...csrfHeaders, ...(options.headers || {}) };
-    const response = await fetch(`${API_BASE}${path}`, {
-      credentials: "include",
-      ...options,
-      headers,
-    });
+
+    let response;
+    try {
+      response = await fetch(`${API_BASE}${path}`, {
+        credentials: "include",
+        ...options,
+        headers,
+      });
+    } catch (err) {
+      throw new Error(`Falha de rede ao conectar com ${API_BASE}${path}: ${err.message}`);
+    }
 
     const text = await response.text();
     let body = null;
@@ -475,9 +542,10 @@ export default function MainDashboard() {
 
       try {
         const payload = {
-          username: email.trim().toLowerCase(),
+          username: name.trim(),
           email: email.trim().toLowerCase(),
           password,
+          confirm_password: confirmPassword,
         };
 
         const data = await apiFetch("/auth/register", {
@@ -648,33 +716,43 @@ export default function MainDashboard() {
     }
   };
 
-  const handleFileChange = (event) => {
+  const handleFileChange = async (event) => {
     const file = event.target.files?.[0];
     if (file) {
-      // REQ-61: Validar tamanho máximo de 20MB
-      const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB em bytes
+      const MAX_FILE_SIZE = 20 * 1024 * 1024;
       if (file.size > MAX_FILE_SIZE) {
-        setStatusMessage(`❌ Arquivo excede o limite de 20MB (tamanho atual: ${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+        setStatusMessage(`❌ Arquivo excede o limite de 20MB (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
         setAuthError("O arquivo é muito grande. O limite máximo é 20MB.");
         return;
       }
       setUploadedFile(file);
       setSignedPdfUrl(null);
       setSignedPdfName("");
-      setStatusMessage(`✓ Arquivo selecionado: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
-      setAuthError(""); // Limpar erros anteriores
+      setPdfDoc(null);
+      setPdfTotalPages(0);
+      setAuthError("");
+      setStatusMessage(`✓ Arquivo selecionado: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB). Clique no PDF para escolher a posição da assinatura.`);
       setActivity((current) => [
         { hash: "0xNEW...1A2B", date: new Date().toLocaleString("pt-BR"), status: "Em análise", detail: file.name },
         ...current.slice(0, 2),
       ]);
+      // Load PDF preview
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+        setPdfDoc(pdf);
+        setPdfTotalPages(pdf.numPages);
+        // default position: bottom-left of first page
+        const firstPage = await pdf.getPage(1);
+        const vp = firstPage.getViewport({ scale: pdfScale });
+        setSignPosition({ x: 50, y: 50, page: 1, pctX: 0.05, pctY: 0.95, canvasH: vp.height });
+      } catch {
+        setStatusMessage(`✓ Arquivo selecionado: ${file.name}. (Pré-visualização indisponível)`);
+      }
     }
   };
 
   const handleSign = async () => {
-    if (!signatureSaved) {
-      setStatusMessage("Desenhe e salve sua assinatura antes de assinar o documento.");
-      return;
-    }
     if (!uploadedFile) {
       setStatusMessage("Selecione um arquivo PDF antes de assinar.");
       return;
@@ -685,17 +763,14 @@ export default function MainDashboard() {
 
     try {
       const headers = {};
-      if (accessToken) {
-        headers.Authorization = `Bearer ${accessToken}`;
-      }
-      if (csrfToken) {
-        headers["X-CSRF-Token"] = csrfToken;
-      }
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+      if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
 
       const formData = new FormData();
       formData.append("file", uploadedFile);
-      formData.append("coord_x", String(xCoordinate));
-      formData.append("coord_y", String(yCoordinate));
+      formData.append("coord_x", String(signPosition.x));
+      formData.append("coord_y", String(signPosition.y));
+      formData.append("page", String(signPosition.page));
 
       const response = await fetch(`${API_BASE}/pdf/sign`, {
         method: "POST",
@@ -710,23 +785,18 @@ export default function MainDashboard() {
       }
 
       const signedPdfBlob = await response.blob();
-      const signedPdfUrlValue = window.URL.createObjectURL(signedPdfBlob);
-      setSignedPdfUrl(signedPdfUrlValue);
-      setSignedPdfName(`assinado-${(uploadedFile.name || "documento.pdf").replace(/\.pdf$/i, "")}.pdf`);
-      setSignatureCount((count) => count + 1);
+      const url = window.URL.createObjectURL(signedPdfBlob);
+      const fname = `assinado-${(uploadedFile.name || "documento.pdf").replace(/\.pdf$/i, "")}.pdf`;
+      setSignedPdfUrl(url);
+      setSignedPdfName(fname);
+      setSignatureCount((c) => c + 1);
       setActivity((current) => [
-        {
-          hash: `0x${Math.random().toString(16).slice(2, 8).toUpperCase()}...`,
-          date: new Date().toLocaleString("pt-BR"),
-          status: "Assinado",
-          detail: uploadedFile?.name || "Documento PDF",
-        },
+        { hash: `0x${Math.random().toString(16).slice(2, 8).toUpperCase()}...`, date: new Date().toLocaleString("pt-BR"), status: "Assinado", detail: uploadedFile?.name || "Documento PDF" },
         ...current.slice(0, 2),
       ]);
-      setStatusMessage("Documento assinado com sucesso pelo servidor. PDF pronto para download.");
+      setStatusMessage("✓ Documento assinado com sucesso! Clique em 'Baixar PDF Assinado' para salvar.");
     } catch (error) {
-      console.error(error);
-      setStatusMessage("Falha ao assinar o documento. Tente novamente.");
+      setStatusMessage(`❌ Falha ao assinar: ${error.message || "Tente novamente."}`);
     } finally {
       setIsSigning(false);
     }
@@ -1407,79 +1477,53 @@ export default function MainDashboard() {
                 </div>
               )}
 
-              <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-300">Coordenada X</label>
-                  <input
-                    type="number"
-                    value={xCoordinate}
-                    onChange={(event) => setXCoordinate(event.target.value)}
-                    className="w-full rounded-xl border border-gray-800 bg-[#0D1117] px-4 py-3 text-sm text-white outline-none ring-0 transition focus:border-emerald-400/50"
-                    placeholder="120"
-                  />
-                </div>
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-300">Coordenada Y</label>
-                  <input
-                    type="number"
-                    value={yCoordinate}
-                    onChange={(event) => setYCoordinate(event.target.value)}
-                    className="w-full rounded-xl border border-gray-800 bg-[#0D1117] px-4 py-3 text-sm text-white outline-none ring-0 transition focus:border-emerald-400/50"
-                    placeholder="80"
-                  />
-                </div>
-              </div>
-
-              <div className="mt-6 rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-semibold text-white">Assinatura visual</p>
-                    <p className="text-sm text-slate-400">Desenhe e salve sua assinatura para o documento.</p>
+              {/* PDF Viewer com click-to-sign */}
+              {pdfDoc ? (
+                <div className="mt-6 rounded-2xl border border-gray-800 bg-[#0D1117]/70 p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <p className="text-sm font-semibold text-white">Clique no PDF para posicionar a assinatura</p>
+                    <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">
+                      Pg {signPosition.page} — X:{signPosition.x} Y:{signPosition.y}
+                    </span>
                   </div>
-                  <div className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
-                    {signatureSaved ? "Salva" : "Pendente"}
+                  <div className="max-h-[60vh] overflow-y-auto space-y-2 pr-1">
+                    {Array.from({ length: pdfTotalPages }, (_, i) => i + 1).map((pageNum) => (
+                      <PdfPage
+                        key={pageNum}
+                        pdfDoc={pdfDoc}
+                        pageNumber={pageNum}
+                        scale={pdfScale}
+                        isSelected={signPosition.page === pageNum}
+                        marker={signPosition.page === pageNum ? { pctX: signPosition.pctX, pctY: signPosition.pctY } : null}
+                        onClick={(event) => {
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          const pctX = (event.clientX - rect.left) / rect.width;
+                          const pctY = (event.clientY - rect.top) / rect.height;
+                          // Get canvas dimensions to map to PDF coords
+                          const canvas = event.currentTarget.querySelector("canvas");
+                          const canvasW = canvas ? canvas.width : rect.width * pdfScale;
+                          const canvasH = canvas ? canvas.height : rect.height * pdfScale;
+                          const pdfX = Math.round(pctX * canvasW / pdfScale);
+                          const pdfY = Math.round((1 - pctY) * canvasH / pdfScale); // PDF y from bottom
+                          setSignPosition({ x: pdfX, y: pdfY, page: pageNum, pctX, pctY, canvasH });
+                          setStatusMessage(`Assinatura posicionada: Página ${pageNum}, X:${pdfX}, Y:${pdfY}`);
+                        }}
+                      />
+                    ))}
                   </div>
+                  <p className="mt-2 text-xs text-slate-500">
+                    {pdfTotalPages} página{pdfTotalPages !== 1 ? "s" : ""}. Clique em qualquer ponto para posicionar o selo.
+                  </p>
                 </div>
-                <canvas
-                  ref={canvasRef}
-                  width={520}
-                  height={180}
-                  onMouseDown={startDrawing}
-                  onMouseMove={draw}
-                  onMouseUp={stopDrawing}
-                  onMouseLeave={stopDrawing}
-                  onTouchStart={startDrawing}
-                  onTouchMove={draw}
-                  onTouchEnd={stopDrawing}
-                  className="w-full rounded-xl border border-gray-800 bg-[#161B22]"
-                />
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={clearSignature}
-                    className="rounded-xl border border-gray-700 bg-[#161B22] px-3 py-2 text-sm text-slate-300"
-                  >
-                    Limpar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={saveSignature}
-                    className="rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-sm font-semibold text-emerald-300"
-                  >
-                    Salvar assinatura
-                  </button>
+              ) : uploadedFile ? (
+                <div className="mt-6 rounded-xl border border-gray-800 bg-[#0D1117]/70 p-4 text-center text-sm text-slate-400">
+                  Carregando pré-visualização do PDF...
                 </div>
-                {signaturePreview && (
-                  <div className="mt-3 rounded-xl border border-emerald-400/20 bg-emerald-500/10 p-3">
-                    <p className="text-sm font-medium text-emerald-200">Pré-visualização salva</p>
-                    <img src={signaturePreview} alt="Assinatura salva" className="mt-2 h-14 w-full rounded-lg object-contain" />
-                  </div>
-                )}
-              </div>
+              ) : null}
 
               <button
                 onClick={handleSign}
-                disabled={isSigning}
+                disabled={isSigning || !uploadedFile}
                 className="mt-6 flex w-full items-center justify-center gap-3 rounded-[32px] bg-gradient-to-r from-[#00E676] via-[#31EC90] to-[#22DD6F] px-5 py-5 text-lg font-semibold text-[#04110A] shadow-[0_20px_80px_rgba(0,230,118,0.24)] transition hover:shadow-[0_0_45px_rgba(0,230,118,0.35)] disabled:cursor-not-allowed disabled:opacity-70"
               >
                 {isSigning ? (
@@ -1494,14 +1538,15 @@ export default function MainDashboard() {
                   "Assinar Documento"
                 )}
               </button>
-              <button
-                type="button"
-                onClick={handleDownloadPdf}
-                disabled={!signedPdfUrl}
-                className="mt-3 flex w-full items-center justify-center rounded-[32px] border border-emerald-400/20 bg-[#0F181F]/85 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-[#131E27] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                Baixar PDF assinado
-              </button>
+              {signedPdfUrl && (
+                <button
+                  type="button"
+                  onClick={handleDownloadPdf}
+                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-[32px] border border-emerald-400/30 bg-emerald-500/15 px-4 py-4 text-base font-semibold text-emerald-300 transition hover:bg-emerald-500/25 hover:shadow-[0_0_20px_rgba(0,230,118,0.2)]"
+                >
+                  ⬇ Baixar PDF Assinado
+                </button>
+              )}
             </div>
 
             <div className="rounded-[32px] border border-gray-800 bg-[#0B1218]/90 p-5 shadow-[0_0_35px_rgba(0,0,0,0.2)] backdrop-blur-xl">

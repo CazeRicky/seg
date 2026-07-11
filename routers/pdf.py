@@ -82,7 +82,7 @@ async def sign_pdf_endpoint(
 # ==========================================
 @router.post("/verify", dependencies=[Depends(validar_csrf)])
 @limiter.limit("5/minute")
-async def verify_pdf_endpoint(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def verify_pdf_endpoint(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
     Defesa: REQ-50 e REQ-54 - Validação Matemática e Isolada do Arquivo Físico.
     """

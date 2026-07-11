@@ -3,16 +3,29 @@ import json
 import base64
 import hashlib
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pyhanko.sign import signers
 from pyhanko.pdf_utils import text
 from pyhanko.sign.fields import SigFieldSpec, append_signature_field
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
-
-# FIX REQ-50: Importações para abrir e validar a matemática do PDF
 from pyhanko.pdf_utils.reader import PdfFileReader
 from pyhanko.sign.validation import validate_pdf_signature
+from asn1crypto import pem as asn1_pem, keys as asn1_keys, x509 as asn1_x509
+from pyhanko_certvalidator.registry import SimpleCertificateStore
+
+
+def build_signer(priv_pem: str, cert_pem: str) -> signers.SimpleSigner:
+    _, _, key_der = asn1_pem.unarmor(priv_pem.encode("utf-8"))
+    _, _, cert_der = asn1_pem.unarmor(cert_pem.encode("utf-8"))
+    asn1_key = asn1_keys.PrivateKeyInfo.load(key_der)
+    asn1_cert = asn1_x509.Certificate.load(cert_der)
+    cert_store = SimpleCertificateStore()
+    return signers.SimpleSigner(
+        signing_cert=asn1_cert,
+        signing_key=asn1_key,
+        cert_registry=cert_store,
+    )
 
 def main():
     try:
@@ -31,7 +44,7 @@ def main():
             doc_hash = payload['doc_hash']
             sig_id = payload['sig_id']
 
-            signer = signers.SimpleSigner.load_pem_pem(priv_pem.encode('utf-8'), cert_pem.encode('utf-8'))
+            signer = build_signer(priv_pem, cert_pem)
             pdf_stream = io.BytesIO(pdf_bytes)
             out_stream = io.BytesIO()
             writer = IncrementalPdfFileWriter(pdf_stream)
