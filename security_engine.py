@@ -3,11 +3,14 @@ import time
 import jwt
 import pyotp
 import hashlib
+import base64
 from datetime import datetime, timedelta
 from passlib.hash import argon2
-from uuid7 import uuid7
+from uuid_extensions import uuid7
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.backends import default_backend
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.fernet import Fernet
@@ -59,20 +62,41 @@ class SecurityEngine:
     # ==========================================
     # CRIPTOGRAFIA DE PDF E ASSINATURAS
     # ==========================================
+    def _get_fernet_key(self) -> bytes:
+        master_key = os.getenv("MASTER_KEY")
+        if not master_key:
+            raise ValueError("ERRO CRÍTICO: MASTER_KEY ausente no .env")
+
+        raw_key = master_key.encode("utf-8")
+        try:
+            # Tenta usar diretamente como chave Fernet válida
+            return base64.urlsafe_b64decode(raw_key)
+        except Exception:
+            # Se falhar, derivamos uma chave Fernet de 32 bytes via PBKDF2HMAC.
+            # Não precisamos de salt fixo porque o valor da master_key já é sensível
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=b"seg_master_key_salt",
+                iterations=390000,
+                backend=default_backend(),
+            )
+            return kdf.derive(raw_key)
+
+    def _get_fernet(self) -> Fernet:
+        key = self._get_fernet_key()
+        if len(key) != 32:
+            raise ValueError("ERRO CRÍTICO: a chave Fernet derivada deve ter 32 bytes")
+        return Fernet(base64.urlsafe_b64encode(key))
+
     def encrypt_private_key(self, priv_pem_str: str) -> str:
         # Defesa: REQ-45. Encripta a chave com a Master Key do sistema
-        master_key = os.getenv("MASTER_KEY")
-        if not master_key: 
-            raise ValueError("ERRO CRÍTICO: MASTER_KEY ausente no .env")
-        f = Fernet(master_key.encode('utf-8'))
-        return f.encrypt(priv_pem_str.encode('utf-8')).decode('utf-8')
+        f = self._get_fernet()
+        return f.encrypt(priv_pem_str.encode("utf-8")).decode("utf-8")
 
     def decrypt_private_key(self, encrypted_priv_pem_str: str) -> str:
-        master_key = os.getenv("MASTER_KEY")
-        if not master_key: 
-            raise ValueError("ERRO CRÍTICO: MASTER_KEY ausente no .env")
-        f = Fernet(master_key.encode('utf-8'))
-        return f.decrypt(encrypted_priv_pem_str.encode('utf-8')).decode('utf-8')
+        f = self._get_fernet()
+        return f.decrypt(encrypted_priv_pem_str.encode("utf-8")).decode("utf-8")
 
     def generate_user_rsa_keys(self, user_name: str):
         # Defesa: REQ-45. Gera par RSA-2048
@@ -131,15 +155,13 @@ class SecurityEngine:
         return str(uuid7())
     def encrypt_data(self, data: str) -> str:
         # Usado para encriptar o TOTP Secret (REQ-12)
-        master_key = os.getenv("MASTER_KEY")
-        f = Fernet(master_key.encode('utf-8'))
-        return f.encrypt(data.encode('utf-8')).decode('utf-8')
+        f = self._get_fernet()
+        return f.encrypt(data.encode("utf-8")).decode("utf-8")
 
     def decrypt_data(self, encrypted_data: str) -> str:
         # Usado para desencriptar o TOTP Secret (REQ-12)
-        master_key = os.getenv("MASTER_KEY")
-        f = Fernet(master_key.encode('utf-8'))
-        return f.decrypt(encrypted_data.encode('utf-8')).decode('utf-8')
+        f = self._get_fernet()
+        return f.decrypt(encrypted_data.encode("utf-8")).decode("utf-8")
 
 # Instância singleton que mantém as mesmas chaves RSA durante a execução do processo
 sec = SecurityEngine()

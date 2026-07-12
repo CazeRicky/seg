@@ -44,8 +44,9 @@ class PDFSecurityEngine:
             # Inicia o processo isolado.
             # Dica extra: Em Linux de produção podes substituir o comando ["python", worker_path] 
             # por ["bwrap", "--unshare-all", "--ro-bind", "/", "/", "python", worker_path] para sandbox total.
+            import sys
             process = subprocess.Popen(
-                ["python", worker_path],
+                [sys.executable, worker_path],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -69,10 +70,12 @@ class PDFSecurityEngine:
             return signed_bytes, new_hash
 
         except subprocess.TimeoutExpired:
-            process.kill() # Mata o processo imediatamente se ultrapassar os 10 segundos
+            process.kill()
             raise HTTPException(status_code=408, detail={"code": "DOC_007", "message": "Timeout ao processar PDF (possível bomba de descompressão ou ficheiro demasiado pesado)."})
+        except HTTPException:
+            raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail={"code": "DOC_008", "message": "Erro na ponte de comunicação de assinatura."})
+            raise HTTPException(status_code=500, detail={"code": "DOC_008", "message": f"Erro na assinatura: {str(e)}"})
     def verify_document(self, pdf_bytes: bytes) -> dict:
         """
         Defesa: REQ-50 - Consulta estrutural (criptográfica) de assinaturas X.509 em Sandbox
@@ -84,7 +87,8 @@ class PDFSecurityEngine:
         worker_path = os.path.join(os.path.dirname(__file__), "pdf_worker.py")
         
         try:
-            process = subprocess.Popen(["python", worker_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            import sys
+            process = subprocess.Popen([sys.executable, worker_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             stdout, stderr = process.communicate(input=json.dumps(payload), timeout=10)
             
             if process.returncode != 0:
