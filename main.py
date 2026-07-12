@@ -25,6 +25,7 @@ critical_vars = [
     "SMTP_USER",
     "SMTP_PASSWORD",
     "SMTP_FROM"
+    "RP_ID"
 ]
 missing_vars = [var for var in critical_vars if not os.getenv(var)]
 if missing_vars:
@@ -77,12 +78,13 @@ else:
 
 # ---------- PROTEÇÃO CORS ----------
 # RNF-05: Origens dinâmicas retiradas do .env (sem hardcoding)
-allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "https://front-oficial.com,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173")
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "https://front-oficial.com").split(",")
 origens_permitidas = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
 
+# ---------- PROTEÇÃO CORS ----------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origens_permitidas,
+    allow_origins=allowed_origins, # Aqui está a mágica!
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
