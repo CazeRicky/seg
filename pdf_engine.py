@@ -7,7 +7,6 @@ from fastapi import UploadFile, HTTPException
 
 class PDFSecurityEngine:
     async def validate_and_hash(self, file: UploadFile) -> tuple[bytes, str]:
-        # Validação inicial em memória
         contents = await file.read(20 * 1024 * 1024 + 1)
         
         if len(contents) > 20 * 1024 * 1024:
@@ -16,16 +15,13 @@ class PDFSecurityEngine:
         if not contents.startswith(b"%PDF-"):
             raise HTTPException(status_code=400, detail={"code": "DOC_002", "message": "O ficheiro não é um PDF válido"})
             
-        if b"/JS" in contents or b"/JavaScript" in contents:
+        if b"/JavaScript" in contents or b"/JS " in contents or b"/JS\r" in contents or b"/JS\n" in contents or b"/JS<<" in contents:
             raise HTTPException(status_code=400, detail={"code": "DOC_003", "message": "PDF contém JavaScript malicioso"})
             
         doc_hash = hashlib.sha256(contents).hexdigest()
         return contents, doc_hash
 
     def sign_document(self, pdf_bytes: bytes, priv_pem: str, cert_pem: str, user_name: str, coords: tuple, page: int, doc_hash: str, sig_id: str) -> tuple[bytes, str]:
-        """
-        Defesa: REQ-62 - O processamento do PDF é atirado para um processo isolado.
-        """
         payload = {
             "pdf_base64": base64.b64encode(pdf_bytes).decode('utf-8'),
             "priv_pem": priv_pem,
@@ -37,13 +33,9 @@ class PDFSecurityEngine:
             "sig_id": sig_id
         }
 
-        # Caminho absoluto para garantir que encontra o ficheiro
         worker_path = os.path.join(os.path.dirname(__file__), "pdf_worker.py")
         
         try:
-            # Inicia o processo isolado.
-            # Dica extra: Em Linux de produção podes substituir o comando ["python", worker_path] 
-            # por ["bwrap", "--unshare-all", "--ro-bind", "/", "/", "python", worker_path] para sandbox total.
             import sys
             process = subprocess.Popen(
                 [sys.executable, worker_path],
@@ -53,14 +45,26 @@ class PDFSecurityEngine:
                 text=True
             )
             
-            # Comunica com o processo e define um TIMEOUT (mata exploits de ciclos infinitos)
             stdout, stderr = process.communicate(input=json.dumps(payload), timeout=10)
             
             if process.returncode != 0:
-                raise HTTPException(status_code=500, detail={"code": "DOC_005", "message": "Falha crítica no isolamento do PDF."})
+                erro_real = stderr.strip() if stderr else ""
+                # Escava o stdout para encontrar o erro formatado em JSON
+                if stdout:
+                    try:
+                        resp = json.loads(stdout)
+                        if resp.get("status") == "error":
+                            erro_real = resp.get("message")
+                    except:
+                        if not erro_real:
+                            erro_real = stdout.strip()
+                            
+                if not erro_real:
+                    erro_real = "Erro crítico ou quebra súbita no PyHanko."
+                    
+                raise HTTPException(status_code=500, detail={"code": "DOC_005", "message": f"Falha no isolamento do PDF. Detalhes: {erro_real}"})
 
             result = json.loads(stdout)
-            
             if result.get("status") == "error":
                 raise HTTPException(status_code=500, detail={"code": "DOC_006", "message": f"Erro interno ao assinar: {result.get('message')}"})
 
@@ -71,15 +75,13 @@ class PDFSecurityEngine:
 
         except subprocess.TimeoutExpired:
             process.kill()
-            raise HTTPException(status_code=408, detail={"code": "DOC_007", "message": "Timeout ao processar PDF (possível bomba de descompressão ou ficheiro demasiado pesado)."})
+            raise HTTPException(status_code=408, detail={"code": "DOC_007", "message": "Timeout ao processar PDF (possível bomba de descompressão)."})
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": "DOC_008", "message": f"Erro na assinatura: {str(e)}"})
+
     def verify_document(self, pdf_bytes: bytes) -> dict:
-        """
-        Defesa: REQ-50 - Consulta estrutural (criptográfica) de assinaturas X.509 em Sandbox
-        """
         payload = {
             "action": "verify",
             "pdf_base64": base64.b64encode(pdf_bytes).decode('utf-8')
@@ -92,7 +94,18 @@ class PDFSecurityEngine:
             stdout, stderr = process.communicate(input=json.dumps(payload), timeout=10)
             
             if process.returncode != 0:
-                raise HTTPException(status_code=500, detail={"code": "DOC_005", "message": "Falha crítica no isolamento do PDF."})
+                erro_real = stderr.strip() if stderr else ""
+                if stdout:
+                    try:
+                        resp = json.loads(stdout)
+                        if resp.get("status") == "error":
+                            erro_real = resp.get("message")
+                    except:
+                        if not erro_real:
+                            erro_real = stdout.strip()
+                if not erro_real:
+                    erro_real = "Erro desconhecido."
+                raise HTTPException(status_code=500, detail={"code": "DOC_005", "message": f"Falha no isolamento. Detalhes: {erro_real}"})
                 
             result = json.loads(stdout)
             if result.get("status") == "error":

@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Vai buscar a string de ligação que configurou no .env
+os.environ["PGCLIENTENCODING"] = "utf-8"
 SQLALCHEMY_DATABASE_URL = os.getenv("DB_CONNECTION_STRING")
 
 if not SQLALCHEMY_DATABASE_URL:
