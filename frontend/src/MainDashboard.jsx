@@ -1100,9 +1100,9 @@ export default function MainDashboard() {
             <p className="text-xs uppercase tracking-[0.29em] text-slate-500">Status do sistema</p>
             <div className="mt-3 flex items-center gap-2">
               <span className="h-2.5 w-2.5 rounded-full bg-[#00E676] shadow-[0_0_8px_#00E676]" />
-              <span className="text-sm text-slate-200">Opera��o segura online</span>
+              <span className="text-sm text-slate-200">Operação segura online</span>
             </div>
-            <p className="mt-3 text-sm text-slate-400">Assinaturas criptogr�ficas protegidas por certificados v�lidos.</p>
+            <p className="mt-3 text-sm text-slate-400">Assinaturas criptográficas protegidas por certificados válidos.</p>
           </div>
         </aside>
 
