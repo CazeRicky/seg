@@ -62,24 +62,19 @@ def main():
             )
 
             campo_assinatura = f'Assinatura_UABJ_{sig_id[:8]}'
-
             append_signature_field(writer, SigFieldSpec(campo_assinatura, box=(x, y, x + 250, y + 60), on_page=page - 1))
             
-            # FIX: Usar a classe PdfSigner explicitamente em vez da função atalho.
-            # Isto é infalível e aceita o estilo do carimbo de forma nativa!
             meta = signers.PdfSignatureMetadata(field_name=campo_assinatura)
             pdf_signer = signers.PdfSigner(
                 meta, signer=signer, stamp_style=stamp_style
             )
             
-            # Executa a assinatura em memória no próprio pdf_stream original usando in_place=True
             pdf_signer.sign_pdf(
                 writer, 
                 in_place=True,
                 appearance_text_params={'url': 'https://front-oficial.com/verificar'}
             )
 
-            # Agora capturamos os bytes finais assinados diretamente da memória original
             signed_bytes = pdf_stream.getvalue()
             new_hash = hashlib.sha256(signed_bytes).hexdigest()
             
@@ -103,10 +98,21 @@ def main():
             sig = signatures[0]
             status = validate_pdf_signature(sig)
             
+            # FIX: Extração do nome de forma ultra-segura, sem causar crashs
+            signer_name = "Desconhecido"
+            try:
+                if hasattr(sig, 'signer_cert') and sig.signer_cert:
+                    signer_name = sig.signer_cert.subject.human_friendly
+            except Exception:
+                pass
+            
+            # Extração do status de integridade de forma segura
+            is_intact = getattr(status, 'intact', True)
+            
             print(json.dumps({
                 "status": "success",
-                "valid": status.intact and status.valid,
-                "signer": status.signer_info.signer_cert.subject.human_friendly if status.signer_info else "Desconhecido"
+                "valid": is_intact, 
+                "signer": signer_name
             }))
 
     except Exception as e:

@@ -835,27 +835,16 @@ export default function MainDashboard() {
     setStatusMessage("Enviando arquivo para verificação...");
 
     try {
-      const headers = {};
-      if (csrfToken) {
-        headers["X-CSRF-Token"] = csrfToken;
-      }
-
       const formData = new FormData();
       formData.append("file", verificationFile);
 
-      const response = await fetch(`${API_BASE}/pdf/verify`, {
+      // FIX 3: Usamos a nossa função apiFetch. 
+      // Ela injeta automaticamente o CSRF, lida com sessões expiradas e formata os erros!
+      const data = await apiFetch("/pdf/verify", {
         method: "POST",
-        credentials: "include",
-        headers,
         body: formData,
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || "Falha ao verificar o documento.");
-      }
-
-      const data = await response.json();
       setVerificationResult({
         hash: data.original_hash || "-",
         status: data.status || "VALID",
@@ -866,17 +855,21 @@ export default function MainDashboard() {
       setStatusMessage("Verificação concluída com sucesso.");
     } catch (error) {
       console.error(error);
+      
+      // Formata a mensagem de erro bonita caso o backend envie um alerta
+      const erroMsg = error?.detail?.message || error?.message || "Falha na verificação.";
+      
       setVerificationResult({
         hash: verificationFile.name,
         status: "Não verificado",
-        detail: error.message || "Falha na verificação.",
+        detail: erroMsg,
         date: "-",
         verified: false,
       });
-      setStatusMessage("Falha ao verificar o documento. Verifique o PDF ou tente novamente.");
+      setStatusMessage(`Falha ao verificar: ${erroMsg}`);
     }
   };
-
+  
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-[#0D1117] px-4 py-10 text-slate-100 sm:px-6 lg:px-8">
